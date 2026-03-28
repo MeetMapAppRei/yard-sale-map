@@ -38,6 +38,60 @@ function newId() {
   return crypto.randomUUID()
 }
 
+/**
+ * Full pipeline for one image: compress → store → OCR → optional AI → interest scoring.
+ * @param {number} createdAtOffset  ms bump so batch items keep a stable order tie-break
+ */
+async function processScreenshotFile(file, interestRows, createdAtOffset = 0) {
+  const saleId = newId()
+  let toStore
+  try {
+    toStore = await compressImageFile(file)
+  } catch {
+    toStore = file
+  }
+  await putSaleImage(saleId, toStore)
+  let rawText
+  try {
+    rawText = await runOcrOnFile(file, () => {})
+  } catch (e) {
+    await deleteSaleImage(saleId)
+    throw e
+  }
+  let ai = null
+  try {
+    ai = await parseScreenshotWithAi(await fileToBase64(file), file.type)
+  } catch {
+    /* /api optional */
+  }
+  const merged = mergeOcrAndAi(ai, rawText)
+  const { score, matches } = scoreTextAgainstInterests(merged.rawText, interestRows)
+  return {
+    id: saleId,
+    title: merged.title,
+    rawText: merged.rawText,
+    addressQuery: merged.addressQuery,
+    lat: null,
+    lon: null,
+    displayName: null,
+    openMinutes: merged.openMinutes,
+    closeMinutes: merged.closeMinutes,
+    priorityScore: score,
+    interestMatches: matches,
+    createdAt: Date.now() + createdAtOffset,
+    hasImage: true,
+  }
+}
+
+function sortSalesByPriorityThenRecency(sales) {
+  return [...sales].sort((a, b) => {
+    const pa = Number(a.priorityScore) || 0
+    const pb = Number(b.priorityScore) || 0
+    if (pb !== pa) return pb - pa
+    return (b.createdAt || 0) - (a.createdAt || 0)
+  })
+}
+
 export default function App() {
   const [home, setHome] = useState(null)
   const [homeInput, setHomeInput] = useState('')
@@ -114,70 +168,47 @@ export default function App() {
   }
 
   const onUpload = async (e) => {
-    const file = e.target.files?.[0]
+    const picked = Array.from(e.target.files || []).filter((f) => f.type.startsWith('image/'))
     e.target.value = ''
-    if (!file || !file.type.startsWith('image/')) return
+    if (!picked.length) return
     setError(null)
-    const saleId = newId()
 
-    setBusy('Compressing image…')
-    let toStore
-    try {
-      toStore = await compressImageFile(file)
-    } catch {
-      toStore = file
+    const st0 = loadState()
+    const interestRows = st0.interests
+    const newSales = []
+    const failures = []
+
+    for (let i = 0; i < picked.length; i++) {
+      const file = picked[i]
+      const label = picked.length > 1 ? `${i + 1} of ${picked.length}` : ''
+      setBusy(label ? `Scanning ${label}…` : 'Scanning…')
+      try {
+        const sale = await processScreenshotFile(file, interestRows, i)
+        newSales.push(sale)
+      } catch (err) {
+        failures.push(`${file.name || 'image'}: ${err.message || String(err)}`)
+      }
     }
-    setBusy('Saving image…')
-    try {
-      await putSaleImage(saleId, toStore)
-    } catch (err) {
-      setError(err.message || String(err))
+
+    if (!newSales.length) {
       setBusy(null)
+      setError(failures.length ? failures.join(' · ') : 'No images could be processed.')
       return
     }
 
-    setBusy('Reading screenshot (OCR)…')
-    let rawText = ''
-    try {
-      rawText = await runOcrOnFile(file, () => {})
-    } catch (err) {
-      await deleteSaleImage(saleId)
-      setError(err.message || String(err))
-      setBusy(null)
-      return
+    let combined
+    if (picked.length > 1) {
+      const sortedNew = sortSalesByPriorityThenRecency(newSales)
+      combined = [...sortedNew, ...loadState().sales]
+    } else {
+      combined = [...loadState().sales, ...newSales]
     }
-
-    let ai = null
-    setBusy('Optional: AI parse…')
-    try {
-      const b64 = await fileToBase64(file)
-      ai = await parseScreenshotWithAi(b64, file.type)
-    } catch {
-      /* /api only on Vercel or vercel dev; OCR-only is fine */
-    } finally {
-      setBusy(null)
-    }
-
-    const merged = mergeOcrAndAi(ai, rawText)
-    const st = loadState()
-    const { score, matches } = scoreTextAgainstInterests(merged.rawText, st.interests)
-    const sale = {
-      id: saleId,
-      title: merged.title,
-      rawText: merged.rawText,
-      addressQuery: merged.addressQuery,
-      lat: null,
-      lon: null,
-      displayName: null,
-      openMinutes: merged.openMinutes,
-      closeMinutes: merged.closeMinutes,
-      priorityScore: score,
-      interestMatches: matches,
-      createdAt: Date.now(),
-      hasImage: true,
-    }
-    persist({ sales: upsertSale(st.sales, sale) })
+    persist({ sales: combined })
     setRouteResult(null)
+    setBusy(null)
+    if (failures.length) {
+      setError(`Processed ${newSales.length}; skipped ${failures.length}: ${failures.join(' · ')}`)
+    }
   }
 
   const updateSaleField = (id, patch) => {
@@ -424,12 +455,14 @@ export default function App() {
               marginBottom: 8,
             }}
           >
-            Upload image
-            <input type="file" accept="image/*" onChange={onUpload} style={{ display: 'none' }} />
+            Upload screenshots
+            <input type="file" accept="image/*" multiple onChange={onUpload} style={{ display: 'none' }} />
           </label>
           <p style={{ fontSize: 12, color: '#64748b', margin: '8px 0 0' }}>
-            OCR runs on your original file for accuracy; stored copies are resized JPEGs in IndexedDB to save space. Listing
-            fields live in localStorage.
+            You can select <strong>many images at once</strong> (long-press or multi-select in your photo picker). Each is
+            OCR’d and optionally parsed with Claude; a <strong>batch is ordered by interest priority</strong> (highest
+            first) and added to the top of your list. OCR uses each original file; stored copies are JPEGs in IndexedDB.
+            Listing fields live in localStorage.
             After you deploy to Vercel and set <code style={{ color: '#cbd5e1' }}>ANTHROPIC_API_KEY</code>, uploads also call
             the server <code style={{ color: '#cbd5e1' }}>/api/parse-screenshot</code> (Claude vision) for richer address and times
             (optional; plain <code style={{ color: '#cbd5e1' }}>npm run dev</code> stays OCR-only).
