@@ -14,10 +14,14 @@ async function geocodeViaApi(query) {
   try {
     data = JSON.parse(text)
   } catch {
-    throw new Error(text.slice(0, 120) || `Geocode failed (${res.status})`)
+    throw new Error(
+      text.slice(0, 120) || `Couldn’t look up that address right now (${res.status}). Try again in a moment.`,
+    )
   }
   if (!res.ok) {
-    throw new Error(data.error || `Geocode failed (${res.status})`)
+    throw new Error(
+      data.error || `Couldn’t look up that address right now (${res.status}). Try again in a moment.`,
+    )
   }
   return {
     lat: data.lat,
@@ -38,10 +42,10 @@ async function geocodeDirect(query) {
       'Accept-Language': 'en',
     },
   })
-  if (!res.ok) throw new Error(`Geocode failed: ${res.status}`)
+  if (!res.ok) throw new Error(`Couldn’t look up that address (${res.status}). Try again in a moment.`)
   const data = await res.json()
   const hit = data[0]
-  if (!hit) throw new Error('No results for that address')
+  if (!hit) throw new Error('No match for that address. Try city, state, or a nearby landmark.')
   return {
     lat: parseFloat(hit.lat),
     lon: parseFloat(hit.lon),
@@ -51,7 +55,7 @@ async function geocodeDirect(query) {
 
 export async function geocodeAddress(query) {
   const q = String(query || '').trim()
-  if (!q) throw new Error('Empty address')
+  if (!q) throw new Error('Type an address first.')
 
   const now = Date.now()
   const wait = Math.max(0, MIN_GAP_MS - (now - lastCall))

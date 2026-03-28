@@ -92,6 +92,17 @@ function sortSalesByPriorityThenRecency(sales) {
   })
 }
 
+function kmToMiles(km) {
+  return km * 0.621371
+}
+
+function matchSummaryLine(score, _matches) {
+  const s = Number(score) || 0
+  if (s >= 1.5) return 'Strong match for your list'
+  if (s > 0) return 'Some matches for your list'
+  return 'No keyword matches yet'
+}
+
 export default function App() {
   const [home, setHome] = useState(null)
   const [homeInput, setHomeInput] = useState('')
@@ -130,7 +141,7 @@ export default function App() {
 
   const onGeocodeHome = async () => {
     setError(null)
-    setBusy('Geocoding home…')
+    setBusy('Finding your address on the map…')
     try {
       const g = await geocodeAddress(homeInput)
       const h = { lat: g.lat, lon: g.lon, label: g.displayName }
@@ -145,7 +156,7 @@ export default function App() {
   const onUseMyLocation = () => {
     setError(null)
     if (!navigator.geolocation) {
-      setError('Geolocation not available in this browser.')
+      setError("This browser can't use your location. Use \"Use this address\" instead.")
       return
     }
     setBusy('Getting location…')
@@ -160,7 +171,11 @@ export default function App() {
         setBusy(null)
       },
       (err) => {
-        setError(err.message || 'Location error')
+        setError(
+          err.code === 1
+            ? 'Location is turned off or blocked. Allow location for this site, or type your address above.'
+            : 'Could not get your location. Try again or use your address above.',
+        )
         setBusy(null)
       },
       { enableHighAccuracy: true, timeout: 15000 },
@@ -192,7 +207,11 @@ export default function App() {
 
     if (!newSales.length) {
       setBusy(null)
-      setError(failures.length ? failures.join(' · ') : 'No images could be processed.')
+      setError(
+        failures.length
+          ? `None of the photos worked: ${failures.join(' · ')}`
+          : 'No photos could be read. Try clearer pictures or a different format.',
+      )
       return
     }
 
@@ -207,7 +226,9 @@ export default function App() {
     setRouteResult(null)
     setBusy(null)
     if (failures.length) {
-      setError(`Processed ${newSales.length}; skipped ${failures.length}: ${failures.join(' · ')}`)
+      setError(
+        `Added ${newSales.length} sale(s). ${failures.length} photo(s) didn’t work: ${failures.join(' · ')}`,
+      )
     }
   }
 
@@ -230,7 +251,7 @@ export default function App() {
     const s = loadState().sales.find((x) => x.id === id)
     if (!s?.addressQuery?.trim()) return
     setError(null)
-    setBusy('Geocoding sale…')
+    setBusy('Putting this sale on the map…')
     try {
       const g = await geocodeAddress(s.addressQuery)
       updateSaleField(id, {
@@ -249,7 +270,7 @@ export default function App() {
     setError(null)
     const blob = await getSaleImageBlob(id)
     if (!blob) {
-      setError('No screenshot stored for this listing (upload again or restore from backup with images).')
+      setError('No saved photo for this sale. Upload again or restore from a backup that includes pictures.')
       return
     }
     const file = new File([blob], 'screenshot.jpg', { type: blob.type || 'image/jpeg' })
@@ -290,7 +311,9 @@ export default function App() {
       persist({ sales: upsertSale(state.sales, next) })
       setRouteResult(null)
       if (aiError) {
-        setError(`AI parse unavailable (${aiError}). OCR text was still refreshed.`)
+        setError(
+          "Extra smart read didn't run online, but the text from your photo was refreshed. Check your connection or try again later.",
+        )
       }
     } catch (e) {
       setError(e.message || String(e))
@@ -336,7 +359,7 @@ export default function App() {
       return
     }
     setError(null)
-    setBusy(`Geocoding ${missing.length} listing(s)…`)
+    setBusy(`Finding ${missing.length} addresses on the map…`)
     const nextSales = [...state.sales]
     let failed = 0
     for (const sale of missing) {
@@ -359,7 +382,7 @@ export default function App() {
     setRouteResult(null)
     setBusy(null)
     if (failed) {
-      setError(`${failed} listing(s) could not be geocoded. Check those addresses.`)
+      setError(`Couldn't place ${failed} sale(s) on the map. Check those addresses and try again.`)
     }
   }
 
@@ -382,9 +405,9 @@ export default function App() {
         }}
       >
         <h1 style={{ margin: 0, fontSize: '1.35rem', fontWeight: 700 }}>Yard Sale Map</h1>
-        <p style={{ margin: '8px 0 0', color: '#94a3b8', fontSize: 14, maxWidth: 720 }}>
-          Personal tool: upload screenshots, OCR extracts text, you confirm the address, then map pins and a suggested
-          route use open times, distance, and your interest keywords.
+        <p style={{ margin: '8px 0 0', color: '#94a3b8', fontSize: 15, maxWidth: 640, lineHeight: 1.5 }}>
+          Snap photos of flyers and posts. We pull out addresses and times, drop pins on the map, and help you plan a
+          route. Tell us what you’re hunting for (games, tools, jewelry…) and the best matches rise to the top.
         </p>
       </header>
 
@@ -411,7 +434,7 @@ export default function App() {
             </div>
           ) : null}
 
-          <h2 style={{ fontSize: '1rem', margin: '0 0 10px' }}>Home</h2>
+          <h2 style={{ fontSize: '1rem', margin: '0 0 10px' }}>Starting point</h2>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 12 }}>
             <input
               value={homeInput}
@@ -430,10 +453,10 @@ export default function App() {
               onClick={onGeocodeHome}
               style={btn()}
             >
-              Set from address
+              Use this address
             </button>
             <button type="button" onClick={onUseMyLocation} style={btn()}>
-              Use my location
+              Use where I am now
             </button>
           </div>
           {home ? (
@@ -441,10 +464,12 @@ export default function App() {
               {home.label || `${home.lat.toFixed(4)}, ${home.lon.toFixed(4)}`}
             </p>
           ) : (
-            <p style={{ margin: '0 0 16px', fontSize: 13, color: '#64748b' }}>Set home to filter by radius and plan routes.</p>
+            <p style={{ margin: '0 0 16px', fontSize: 13, color: '#64748b' }}>
+              Add a starting point to see what’s nearby and build a driving order.
+            </p>
           )}
 
-          <h2 style={{ fontSize: '1rem', margin: '20px 0 10px' }}>Screenshots</h2>
+          <h2 style={{ fontSize: '1rem', margin: '20px 0 10px' }}>Photos</h2>
           <label
             style={{
               display: 'inline-block',
@@ -455,22 +480,19 @@ export default function App() {
               marginBottom: 8,
             }}
           >
-            Upload screenshots
+            Choose photos
             <input type="file" accept="image/*" multiple onChange={onUpload} style={{ display: 'none' }} />
           </label>
-          <p style={{ fontSize: 12, color: '#64748b', margin: '8px 0 0' }}>
-            You can select <strong>many images at once</strong> (long-press or multi-select in your photo picker). Each is
-            OCR’d and optionally parsed with Claude; a <strong>batch is ordered by interest priority</strong> (highest
-            first) and added to the top of your list. OCR uses each original file; stored copies are JPEGs in IndexedDB.
-            Listing fields live in localStorage.
-            After you deploy to Vercel and set <code style={{ color: '#cbd5e1' }}>ANTHROPIC_API_KEY</code>, uploads also call
-            the server <code style={{ color: '#cbd5e1' }}>/api/parse-screenshot</code> (Claude vision) for richer address and times
-            (optional; plain <code style={{ color: '#cbd5e1' }}>npm run dev</code> stays OCR-only).
+          <p style={{ fontSize: 13, color: '#94a3b8', margin: '8px 0 0', lineHeight: 1.45 }}>
+            Pick <strong>one or many</strong> at a time (in your gallery, use multi-select). We read the text from each
+            photo, and when you’re online we also use a smart reader for better addresses and times. New batches are sorted
+            with your best keyword matches first and appear at the top of your list.
           </p>
 
-          <h2 style={{ fontSize: '1rem', margin: '24px 0 10px' }}>Interests (priority)</h2>
-          <p style={{ fontSize: 13, color: '#94a3b8', margin: '0 0 8px' }}>
-            Comma-separated keywords per category. Matching text raises priority on the map and in routing.
+          <h2 style={{ fontSize: '1rem', margin: '24px 0 10px' }}>What you’re looking for</h2>
+          <p style={{ fontSize: 13, color: '#94a3b8', margin: '0 0 8px', lineHeight: 1.45 }}>
+            Type words to hunt for, separated by commas (e.g. <em>Lego, Nintendo, tools</em>). Sales that mention them rank
+            higher on the map and in your trip order.
           </p>
           {interests.map((row, idx) => (
             <div key={row.id} style={{ marginBottom: 8, display: 'grid', gap: 6 }}>
@@ -482,7 +504,7 @@ export default function App() {
                     next[idx] = { ...row, label: e.target.value }
                     onInterestsChange(next)
                   }}
-                  placeholder="Label"
+                  placeholder="Group name (e.g. Video games)"
                   style={inp()}
                 />
                 <button
@@ -503,7 +525,7 @@ export default function App() {
                   next[idx] = { ...row, keywords: e.target.value }
                   onInterestsChange(next)
                 }}
-                placeholder="keywords, like, this"
+                placeholder="words to find, separated by commas"
                 rows={2}
                 style={{ ...inp(), resize: 'vertical' }}
               />
@@ -519,60 +541,64 @@ export default function App() {
             }
             style={btnGhost()}
           >
-            Add interest group
+            Add another group
           </button>
 
-          <h2 style={{ fontSize: '1rem', margin: '24px 0 10px' }}>Backup</h2>
-          <p style={{ fontSize: 12, color: '#64748b', margin: '0 0 8px' }}>
-            Export JSON includes listings, home, interests, settings, and screenshot blobs. Import replaces the current data
-            and reloads the page.
-          </p>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 8 }}>
-            <button
-              type="button"
-              onClick={async () => {
-                setError(null)
-                try {
-                  await downloadJsonBackup(loadState())
-                } catch (err) {
-                  setError(err.message || String(err))
-                }
-              }}
-              style={btn()}
-            >
-              Export backup
-            </button>
-            <label style={{ ...btn(), display: 'inline-block' }}>
-              Import backup
-              <input
-                type="file"
-                accept="application/json,.json"
-                onChange={async (ev) => {
-                  const file = ev.target.files?.[0]
-                  ev.target.value = ''
-                  if (!file) return
+          <details className="ysm-details">
+            <summary>Save or restore everything</summary>
+            <p style={{ fontSize: 13, color: '#94a3b8', margin: '0 0 10px', lineHeight: 1.45 }}>
+              Download a file with all your sales, photos, and settings—or bring them back on a new phone. Restoring
+              reloads the app.
+            </p>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+              <button
+                type="button"
+                onClick={async () => {
                   setError(null)
-                  setBusy('Restoring backup…')
                   try {
-                    const text = await file.text()
-                    const state = await importBackupJson(text)
-                    writeFullState(state)
-                    window.location.reload()
+                    await downloadJsonBackup(loadState())
                   } catch (err) {
                     setError(err.message || String(err))
-                  } finally {
-                    setBusy(null)
                   }
                 }}
-                style={{ display: 'none' }}
-              />
-            </label>
-          </div>
+                style={btn()}
+              >
+                Download copy
+              </button>
+              <label style={{ ...btn(), display: 'inline-block' }}>
+                Restore from file
+                <input
+                  type="file"
+                  accept="application/json,.json"
+                  onChange={async (ev) => {
+                    const file = ev.target.files?.[0]
+                    ev.target.value = ''
+                    if (!file) return
+                    setError(null)
+                    setBusy('Restoring…')
+                    try {
+                      const text = await file.text()
+                      const state = await importBackupJson(text)
+                      writeFullState(state)
+                      window.location.reload()
+                    } catch (err) {
+                      setError(err.message || String(err))
+                    } finally {
+                      setBusy(null)
+                    }
+                  }}
+                  style={{ display: 'none' }}
+                />
+              </label>
+            </div>
+          </details>
 
-          <h2 style={{ fontSize: '1rem', margin: '24px 0 10px' }}>Routing settings</h2>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+          <h2 style={{ fontSize: '1rem', margin: '24px 0 10px' }}>Trip planner</h2>
+          <details className="ysm-details" style={{ marginTop: 0 }}>
+            <summary>Driving assumptions (tap to change)</summary>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 8 }}>
             <label style={labelSmall()}>
-              Avg speed (km/h)
+              Typical driving speed (km/h — only used to guess how long drives take)
               <input
                 type="number"
                 min={5}
@@ -582,7 +608,7 @@ export default function App() {
               />
             </label>
             <label style={labelSmall()}>
-              Dwell (min per stop)
+              Minutes at each stop
               <input
                 type="number"
                 min={5}
@@ -594,7 +620,7 @@ export default function App() {
               />
             </label>
             <label style={{ ...labelSmall(), gridColumn: '1 / -1' }}>
-              Search radius (miles from home)
+              How far out to include (miles from starting point)
               <input
                 type="number"
                 min={1}
@@ -606,9 +632,10 @@ export default function App() {
                 style={inp()}
               />
             </label>
-          </div>
+            </div>
+          </details>
           <label style={{ ...labelSmall(), marginTop: 12 }}>
-            Leave home at
+            Leave at
             <input
               type="time"
               value={startTime}
@@ -617,7 +644,7 @@ export default function App() {
             />
           </label>
           <button type="button" onClick={runPlan} style={{ ...btn(), marginTop: 12, width: '100%' }}>
-            Build suggested route
+            Plan my driving order
           </button>
           {routeResult?.message ? (
             <p style={{ fontSize: 13, color: '#fcd34d', marginTop: 8 }}>{routeResult.message}</p>
@@ -629,7 +656,7 @@ export default function App() {
                   <li key={s.id} style={{ marginBottom: 8 }}>
                     <strong>{i + 1}.</strong> {s.title}{' '}
                     <span style={{ color: '#94a3b8' }}>
-                      — arrive ~{minutesToLabel(s.plannedArrivalMinutes)} ({Math.round(s.travelFromPreviousMinutes)} min
+                      — about {minutesToLabel(s.plannedArrivalMinutes)} (~{Math.round(s.travelFromPreviousMinutes)} min
                       drive)
                     </span>
                   </li>
@@ -667,8 +694,8 @@ export default function App() {
                   >
                     Open route in Apple Maps
                   </a>
-                  <p style={{ margin: 0, fontSize: 11, color: '#64748b' }}>
-                    Apple may reorder or simplify some stops on certain devices; Google usually matches the list order best.
+                  <p style={{ margin: 0, fontSize: 12, color: '#64748b' }}>
+                    Tip: Google Maps usually follows this order best. Apple Maps sometimes changes multi-stop trips.
                   </p>
                 </div>
               ) : null}
@@ -704,7 +731,7 @@ export default function App() {
                   setRouteResult(null)
                 }}
               />
-              Priority matches only
+              Only sales that match my keywords
             </label>
             <button
               type="button"
@@ -712,7 +739,7 @@ export default function App() {
               style={btnGhost()}
               disabled={!!busy || !!busySaleId}
             >
-              Geocode all missing
+              Put all on map
             </button>
           </div>
 
@@ -731,10 +758,10 @@ export default function App() {
             )
           </h2>
           {sales.length === 0 ? (
-            <p style={{ color: '#64748b', fontSize: 14 }}>No listings yet. Upload a screenshot to begin.</p>
+            <p style={{ color: '#64748b', fontSize: 14 }}>No sales yet. Add some photos to get started.</p>
           ) : displayedSales.length === 0 ? (
             <p style={{ color: '#64748b', fontSize: 14 }}>
-              No listings match your interest keywords. Turn off “Priority matches only” or add keywords.
+              Nothing matches your keywords. Turn off “Only sales that match my keywords” or add different words.
             </p>
           ) : (
             displayedSales.map((s, idx) => (
@@ -763,18 +790,24 @@ export default function App() {
                     Delete
                   </button>
                 </div>
-                <div style={{ fontSize: 12, color: '#94a3b8', marginTop: 4 }}>
-                  Priority {s.priorityScore?.toFixed(2) ?? '0'}
-                  {s.interestMatches?.length
-                    ? ` · matches: ${s.interestMatches.map((m) => m.keyword).join(', ')}`
-                    : ''}
-                  {home && s.lat != null
-                    ? ` · ${haversineKm(home.lat, home.lon, s.lat, s.lon).toFixed(1)} km from home`
-                    : ''}
+                <div style={{ fontSize: 13, color: '#94a3b8', marginTop: 6, lineHeight: 1.4 }}>
+                  <span style={{ color: '#e2e8f0' }}>{matchSummaryLine(s.priorityScore, s.interestMatches)}</span>
+                  {s.interestMatches?.length ? (
+                    <span>
+                      {' '}
+                      · Found: {s.interestMatches.map((m) => m.keyword).join(', ')}
+                    </span>
+                  ) : null}
+                  {home && s.lat != null ? (
+                    <span>
+                      {' '}
+                      · ~{kmToMiles(haversineKm(home.lat, home.lon, s.lat, s.lon)).toFixed(1)} mi away
+                    </span>
+                  ) : null}
                 </div>
                 <SaleThumb saleId={s.id} />
                 <label style={{ ...labelSmall(), marginTop: 8 }}>
-                  Address search (edit, then geocode)
+                  Address (fix if it looks wrong)
                   <input
                     value={s.addressQuery}
                     onChange={(e) => updateSaleField(s.id, { addressQuery: e.target.value })}
@@ -783,19 +816,19 @@ export default function App() {
                 </label>
                 <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap', alignItems: 'center' }}>
                   <button type="button" onClick={() => geocodeSale(s.id)} disabled={busySaleId === s.id} style={btn()}>
-                    Geocode
+                    Put on map
                   </button>
                   <button
                     type="button"
                     onClick={() => reparseSale(s.id)}
                     disabled={busySaleId === s.id}
                     style={btnGhost()}
-                    title="Re-run Tesseract OCR and optional /api vision parse on the saved screenshot"
+                    title="Read this photo again for better text"
                   >
-                    {busySaleId === s.id ? 'Re-parsing…' : 'Re-run AI & OCR'}
+                    {busySaleId === s.id ? 'Reading…' : 'Read photo again'}
                   </button>
                   {s.displayName ? (
-                    <span style={{ fontSize: 12, color: '#86efac', alignSelf: 'center' }}>Located</span>
+                    <span style={{ fontSize: 12, color: '#86efac', alignSelf: 'center' }}>On map</span>
                   ) : null}
                 </div>
                 {s.lat != null && s.lon != null ? (
@@ -826,15 +859,15 @@ export default function App() {
                     </a>
                   </div>
                 ) : null}
-                <label style={{ ...labelSmall(), marginTop: 8 }}>
-                  Raw text (OCR)
+                <details className="ysm-details" style={{ marginTop: 10 }}>
+                  <summary>Text read from the photo</summary>
                   <textarea
                     value={s.rawText}
                     onChange={(e) => updateSaleField(s.id, { rawText: e.target.value, interestsRefresh: true })}
-                    rows={4}
-                    style={{ ...inp(), resize: 'vertical', fontFamily: 'ui-monospace, monospace', fontSize: 12 }}
+                    rows={5}
+                    style={{ ...inp(), resize: 'vertical', fontSize: 15, marginTop: 8 }}
                   />
-                </label>
+                </details>
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 8 }}>
                   <label style={labelSmall()}>
                     Opens

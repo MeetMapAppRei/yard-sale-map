@@ -27,6 +27,13 @@ function priorityIcon(color) {
   })
 }
 
+function matchHintFromScore(score) {
+  const s = Number(score) || 0
+  if (s >= 1.5) return 'Strong match for your list'
+  if (s > 0) return 'Some matches for your list'
+  return 'No keyword matches yet'
+}
+
 function FitBounds({ points, padding = [24, 24] }) {
   const map = useMap()
   useEffect(() => {
@@ -72,7 +79,7 @@ export default function SaleMap({
         {fitPoints.length > 1 ? <FitBounds points={fitPoints} /> : null}
         {home ? (
           <Marker position={[home.lat, home.lon]} icon={priorityIcon('#38bdf8')}>
-            <Popup>Home</Popup>
+            <Popup>Starting point</Popup>
           </Marker>
         ) : null}
         {home && radiusMiles > 0 ? <Circle center={[home.lat, home.lon]} radius={radiusM} pathOptions={{ color: '#64748b', fillOpacity: 0.05 }} /> : null}
@@ -84,11 +91,11 @@ export default function SaleMap({
               <Popup>
                 <div style={{ maxWidth: 220 }}>
                   <strong>{s.title || 'Sale'}</strong>
-                  <div style={{ marginTop: 6, fontSize: 12 }}>
-                    Priority: {pri.toFixed(1)}
+                  <div style={{ marginTop: 6, fontSize: 13, lineHeight: 1.4 }}>
+                    {matchHintFromScore(pri)}
                     {s.interestMatches?.length ? (
                       <div style={{ marginTop: 4 }}>
-                        Matches: {s.interestMatches.map((m) => m.keyword).join(', ')}
+                        Found: {s.interestMatches.map((m) => m.keyword).join(', ')}
                       </div>
                     ) : null}
                   </div>

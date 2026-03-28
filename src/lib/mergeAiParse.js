@@ -14,7 +14,7 @@ export function mergeOcrAndAi(ai, ocrText) {
   let title = addressGuess.slice(0, 80) || 'Sale'
 
   if (ai?.summary_text) {
-    rawText = [String(ai.summary_text).trim(), '\n---\nOCR:\n', text].join('')
+    rawText = [String(ai.summary_text).trim(), '\n---\nAlso read from the photo:\n', text].join('')
   }
   if (ai?.address_line) addressGuess = String(ai.address_line).trim()
   if (ai?.title) title = String(ai.title).slice(0, 80)

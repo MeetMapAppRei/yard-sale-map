@@ -24,7 +24,11 @@ function travelMinutes(from, to, avgKmh) {
  */
 export function planRoute({ home, startMinutes, sales, settings }) {
   if (!home || !sales?.length) {
-    return { ordered: [], legs: [], message: 'Set home and at least one geocoded sale.' }
+    return {
+      ordered: [],
+      legs: [],
+      message: 'Set your starting point and use “Put on map” on at least one sale first.',
+    }
   }
 
   const radiusKm = milesToKm(settings.searchRadiusMiles)
@@ -37,7 +41,11 @@ export function planRoute({ home, startMinutes, sales, settings }) {
   })
 
   if (!inRadius.length) {
-    return { ordered: [], legs: [], message: 'No sales within your search radius with coordinates.' }
+    return {
+      ordered: [],
+      legs: [],
+      message: 'No sales on the map within your distance limit—or they still need addresses placed on the map.',
+    }
   }
 
   const unvisited = new Set(inRadius.map((s) => s.id))
@@ -110,7 +118,7 @@ export function planRoute({ home, startMinutes, sales, settings }) {
     skipped,
     message:
       skipped.length > 0
-        ? `${skipped.length} sale(s) could not be fit (time windows or optimizer stopped early).`
+        ? `${skipped.length} sale(s) didn’t fit open/close times or the planner stopped early—check times or try again.`
         : null,
   }
 }
