@@ -118,6 +118,7 @@ export default function App() {
   const [routeResult, setRouteResult] = useState(null)
   const [busy, setBusy] = useState(null)
   const [busySaleId, setBusySaleId] = useState(null)
+  const [photoImportProgress, setPhotoImportProgress] = useState(null)
   const [error, setError] = useState(null)
 
   useEffect(() => {
@@ -127,6 +128,17 @@ export default function App() {
     setInterests(s.interests)
     setSettings(s.settings)
   }, [])
+
+  const globalPhotoBusy = photoImportProgress != null || busySaleId != null
+
+  useEffect(() => {
+    if (!globalPhotoBusy) return
+    const prev = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      document.body.style.overflow = prev
+    }
+  }, [globalPhotoBusy])
 
   const persist = useCallback(
     (patch) => {
@@ -193,42 +205,43 @@ export default function App() {
     const newSales = []
     const failures = []
 
-    for (let i = 0; i < picked.length; i++) {
-      const file = picked[i]
-      const label = picked.length > 1 ? `${i + 1} of ${picked.length}` : ''
-      setBusy(label ? `Scanning ${label}…` : 'Scanning…')
-      try {
-        const sale = await processScreenshotFile(file, interestRows, i)
-        newSales.push(sale)
-      } catch (err) {
-        failures.push(`${file.name || 'image'}: ${err.message || String(err)}`)
+    try {
+      for (let i = 0; i < picked.length; i++) {
+        const file = picked[i]
+        setPhotoImportProgress({ current: i + 1, total: picked.length })
+        try {
+          const sale = await processScreenshotFile(file, interestRows, i)
+          newSales.push(sale)
+        } catch (err) {
+          failures.push(`${file.name || 'image'}: ${err.message || String(err)}`)
+        }
       }
-    }
 
-    if (!newSales.length) {
-      setBusy(null)
-      setError(
-        failures.length
-          ? `None of the photos worked: ${failures.join(' · ')}`
-          : 'No photos could be read. Try clearer pictures or a different format.',
-      )
-      return
-    }
+      if (!newSales.length) {
+        setError(
+          failures.length
+            ? `None of the photos worked: ${failures.join(' · ')}`
+            : 'No photos could be read. Try clearer pictures or a different format.',
+        )
+        return
+      }
 
-    let combined
-    if (picked.length > 1) {
-      const sortedNew = sortSalesByPriorityThenRecency(newSales)
-      combined = [...sortedNew, ...loadState().sales]
-    } else {
-      combined = [...loadState().sales, ...newSales]
-    }
-    persist({ sales: combined })
-    setRouteResult(null)
-    setBusy(null)
-    if (failures.length) {
-      setError(
-        `Added ${newSales.length} sale(s). ${failures.length} photo(s) didn’t work: ${failures.join(' · ')}`,
-      )
+      let combined
+      if (picked.length > 1) {
+        const sortedNew = sortSalesByPriorityThenRecency(newSales)
+        combined = [...sortedNew, ...loadState().sales]
+      } else {
+        combined = [...loadState().sales, ...newSales]
+      }
+      persist({ sales: combined })
+      setRouteResult(null)
+      if (failures.length) {
+        setError(
+          `Added ${newSales.length} sale(s). ${failures.length} photo(s) didn’t work: ${failures.join(' · ')}`,
+        )
+      }
+    } finally {
+      setPhotoImportProgress(null)
     }
   }
 
@@ -395,8 +408,46 @@ export default function App() {
     })
   }, [home, displayedSales, settings.searchRadiusMiles])
 
+  const importPct =
+    photoImportProgress && photoImportProgress.total > 0
+      ? Math.round((photoImportProgress.current / photoImportProgress.total) * 100)
+      : 0
+
   return (
     <div style={{ minHeight: '100%', display: 'flex', flexDirection: 'column' }}>
+      {globalPhotoBusy ? (
+        <div
+          className="ysm-global-busy"
+          role="status"
+          aria-live="polite"
+          aria-busy="true"
+          aria-label={photoImportProgress ? 'Reading photos' : 'Updating sale from photo'}
+        >
+          <div className="ysm-global-busy-inner">
+            <div className="ysm-global-busy-spinner" aria-hidden />
+            {photoImportProgress ? (
+              <>
+                <p className="ysm-global-busy-title">Reading your photos…</p>
+                <p className="ysm-global-busy-sub">
+                  Photo {photoImportProgress.current} of {photoImportProgress.total}
+                </p>
+                <div className="ysm-global-busy-track">
+                  <div className="ysm-global-busy-fill" style={{ width: `${importPct}%` }} />
+                </div>
+                <p className="ysm-global-busy-hint">
+                  Pulling out addresses, times, and text. Each one can take a few seconds—especially online.
+                </p>
+              </>
+            ) : (
+              <>
+                <p className="ysm-global-busy-title">Updating this sale…</p>
+                <p className="ysm-global-busy-sub">Re-reading your photo (text and details).</p>
+                <p className="ysm-global-busy-hint">Hang tight—this usually takes a few seconds.</p>
+              </>
+            )}
+          </div>
+        </div>
+      ) : null}
       <header
         style={{
           padding: '16px 20px',

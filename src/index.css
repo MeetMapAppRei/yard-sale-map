@@ -143,3 +143,77 @@ details.ysm-subdetails > summary {
   color: #94a3b8;
 }
 
+/* Full-screen “working” state for photo import / re-read */
+.ysm-global-busy {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: max(20px, env(safe-area-inset-top)) 24px max(24px, env(safe-area-inset-bottom));
+  background: rgba(15, 23, 42, 0.94);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+}
+
+.ysm-global-busy-inner {
+  width: 100%;
+  max-width: 340px;
+  text-align: center;
+}
+
+.ysm-global-busy-spinner {
+  width: 56px;
+  height: 56px;
+  margin: 0 auto 20px;
+  border-radius: 50%;
+  border: 4px solid #334155;
+  border-top-color: #60a5fa;
+  border-right-color: #818cf8;
+  animation: ysm-spin 0.75s linear infinite;
+}
+
+@keyframes ysm-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.ysm-global-busy-title {
+  margin: 0 0 10px;
+  font-size: 1.35rem;
+  font-weight: 700;
+  color: #f8fafc;
+  line-height: 1.25;
+}
+
+.ysm-global-busy-sub {
+  margin: 0 0 18px;
+  font-size: 1.05rem;
+  color: #cbd5e1;
+  line-height: 1.45;
+}
+
+.ysm-global-busy-hint {
+  margin: 0;
+  font-size: 0.9rem;
+  color: #64748b;
+  line-height: 1.45;
+}
+
+.ysm-global-busy-track {
+  height: 6px;
+  border-radius: 999px;
+  background: #1e293b;
+  overflow: hidden;
+  margin-bottom: 14px;
+}
+
+.ysm-global-busy-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #3b82f6, #8b5cf6);
+  transition: width 0.35s ease-out;
+}
+
