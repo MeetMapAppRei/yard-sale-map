@@ -1,6 +1,7 @@
 {
   "name": "yard-sale-map",
   "version": "0.1.0",
+  "description": "Yard Sale Route Planner — photos to map, interests, driving order",
   "private": true,
   "type": "module",
   "engines": {

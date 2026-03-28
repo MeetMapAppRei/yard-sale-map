@@ -9,9 +9,10 @@ export default defineConfig({
       registerType: 'autoUpdate',
       includeAssets: ['icon.svg'],
       manifest: {
-        name: 'Yard Sale Map',
-        short_name: 'YardSales',
-        description: 'Yard and estate sale screenshots on a map with routes.',
+        name: 'Yard Sale Route Planner',
+        short_name: 'YSR Planner',
+        description:
+          'Plan your yard and garage sale day: photos to map pins, interests, and a sensible driving order.',
         theme_color: '#111827',
         background_color: '#0f172a',
         display: 'standalone',

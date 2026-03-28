@@ -1,4 +1,4 @@
-# Yard Sale Map
+# Yard Sale Route Planner
 
 Screenshot uploads → OCR (+ optional AI) → geocode → map, interest priority, and driving routes. **Install on your phone** (PWA) and use **HTTPS** everywhere so location and APIs work on the move.
 
@@ -15,7 +15,7 @@ You need a **public HTTPS URL**. Recommended: **Vercel** (free tier is enough fo
    ```bash
    git init
    git add .
-   git commit -m "Yard Sale Map"
+   git commit -m "Yard Sale Route Planner"
    git branch -M main
    git remote add origin https://github.com/YOUR_USER/YOUR_REPO.git
    git push -u origin main

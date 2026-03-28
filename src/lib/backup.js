@@ -49,7 +49,7 @@ export async function downloadJsonBackup(state) {
   const blob = new Blob([JSON.stringify(payload, null, 0)], { type: 'application/json' })
   const a = document.createElement('a')
   a.href = URL.createObjectURL(blob)
-  a.download = `yard-sale-map-backup-${new Date().toISOString().slice(0, 10)}.json`
+    a.download = `yard-sale-route-planner-backup-${new Date().toISOString().slice(0, 10)}.json`
   a.click()
   URL.revokeObjectURL(a.href)
 }

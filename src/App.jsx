@@ -404,7 +404,7 @@ export default function App() {
           background: '#020617',
         }}
       >
-        <h1 style={{ margin: 0, fontSize: '1.35rem', fontWeight: 700 }}>Yard Sale Map</h1>
+        <h1 style={{ margin: 0, fontSize: '1.35rem', fontWeight: 700 }}>Yard Sale Route Planner</h1>
         <p style={{ margin: '8px 0 0', color: '#94a3b8', fontSize: 15, maxWidth: 640, lineHeight: 1.5 }}>
           Snap photos of flyers and posts. We pull out addresses and times, drop pins on the map, and help you plan a
           route. Tell us what you’re hunting for (games, tools, jewelry…) and the best matches rise to the top.

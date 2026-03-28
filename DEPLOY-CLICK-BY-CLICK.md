@@ -1,4 +1,4 @@
-# Click-by-click: put Yard Sale Map on the internet (use on your phone anywhere)
+# Click-by-click: put Yard Sale Route Planner on the internet (use on your phone anywhere)
 
 Do these **once**. After that, your app has a real **`https://` link** you can open on cellular Wi‑Fi or LTE.
 
