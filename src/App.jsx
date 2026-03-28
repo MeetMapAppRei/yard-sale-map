@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import SaleMap from './components/SaleMap.jsx'
 import SaleThumb from './components/SaleThumb.jsx'
 import { loadState, saveState, writeFullState, upsertSale, removeSale, defaultInterests } from './lib/storage.js'
@@ -120,6 +120,10 @@ export default function App() {
   const [busySaleId, setBusySaleId] = useState(null)
   const [photoImportProgress, setPhotoImportProgress] = useState(null)
   const [error, setError] = useState(null)
+  /** Which sale cards have open `<details>` (key present and true). */
+  const [saleCardOpen, setSaleCardOpen] = useState({})
+  const [mapJustAddedId, setMapJustAddedId] = useState(null)
+  const mapFlashTimeoutRef = useRef(null)
 
   useEffect(() => {
     const s = loadState()
@@ -139,6 +143,12 @@ export default function App() {
       document.body.style.overflow = prev
     }
   }, [globalPhotoBusy])
+
+  useEffect(() => {
+    return () => {
+      if (mapFlashTimeoutRef.current) clearTimeout(mapFlashTimeoutRef.current)
+    }
+  }, [])
 
   const persist = useCallback(
     (patch) => {
@@ -272,6 +282,13 @@ export default function App() {
         lon: g.lon,
         displayName: g.displayName,
       })
+      setSaleCardOpen((prev) => ({ ...prev, [id]: false }))
+      if (mapFlashTimeoutRef.current) clearTimeout(mapFlashTimeoutRef.current)
+      setMapJustAddedId(id)
+      mapFlashTimeoutRef.current = setTimeout(() => {
+        setMapJustAddedId((cur) => (cur === id ? null : cur))
+        mapFlashTimeoutRef.current = null
+      }, 3200)
     } catch (e) {
       setError(e.message || String(e))
     } finally {
@@ -387,6 +404,7 @@ export default function App() {
             displayName: g.displayName,
           }
         }
+        setSaleCardOpen((prev) => ({ ...prev, [sale.id]: false }))
       } catch {
         failed += 1
       }
@@ -837,6 +855,10 @@ export default function App() {
                   style={{
                     opacity: withinRadius[idx] || !home ? 1 : 0.72,
                   }}
+                  open={saleCardOpen[s.id] === true}
+                  onToggle={(e) => {
+                    setSaleCardOpen((prev) => ({ ...prev, [s.id]: e.currentTarget.open }))
+                  }}
                 >
                   <summary>
                     <div style={{ flex: 1, minWidth: 0, paddingRight: 4 }}>
@@ -867,6 +889,19 @@ export default function App() {
                       >
                         {metaLine}
                       </div>
+                      {mapJustAddedId === s.id ? (
+                        <div
+                          style={{
+                            fontSize: 13,
+                            color: '#86efac',
+                            fontWeight: 600,
+                            marginTop: 8,
+                            letterSpacing: 0.02,
+                          }}
+                        >
+                          Added to map
+                        </div>
+                      ) : null}
                     </div>
                     <button
                       type="button"
@@ -877,6 +912,12 @@ export default function App() {
                           await deleteSaleImage(s.id)
                           persist({ sales: removeSale(loadState().sales, s.id) })
                           setRouteResult(null)
+                          setSaleCardOpen((prev) => {
+                            const next = { ...prev }
+                            delete next[s.id]
+                            return next
+                          })
+                          setMapJustAddedId((cur) => (cur === s.id ? null : cur))
                         })()
                       }}
                       style={{ ...btnGhost(), flexShrink: 0, marginTop: 2 }}
@@ -898,7 +939,7 @@ export default function App() {
                       <button
                         type="button"
                         onClick={() => geocodeSale(s.id)}
-                        disabled={busySaleId === s.id}
+                        disabled={!!busy || !!busySaleId}
                         style={btn()}
                       >
                         Put on map
