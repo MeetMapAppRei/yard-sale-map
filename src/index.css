@@ -268,3 +268,59 @@ details.ysm-subdetails > summary {
   box-shadow: inset 0 0 0 1px #0f172a;
 }
 
+.ysm-offline-banner {
+  padding: 10px 20px;
+  font-size: 14px;
+  line-height: 1.45;
+  color: #fef3c7;
+  background: #78350f;
+  border-bottom: 1px solid #92400e;
+  text-align: center;
+}
+
+.ysm-offline-banner strong {
+  color: #fff;
+  font-weight: 700;
+}
+
+.ysm-undo-snack {
+  position: fixed;
+  left: 12px;
+  right: 12px;
+  bottom: max(12px, env(safe-area-inset-bottom));
+  z-index: 9998;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: #1e293b;
+  border: 1px solid #475569;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+}
+
+.ysm-undo-snack-text {
+  font-size: 14px;
+  color: #e2e8f0;
+  line-height: 1.35;
+  min-width: 0;
+  flex: 1;
+}
+
+.ysm-undo-snack-btn {
+  flex-shrink: 0;
+  padding: 8px 16px;
+  border-radius: 8px;
+  border: 2px solid #facc15;
+  background: #facc15;
+  color: #0f172a;
+  font-weight: 700;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.ysm-undo-snack-btn:active {
+  filter: brightness(0.95);
+}
+

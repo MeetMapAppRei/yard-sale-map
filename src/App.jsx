@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import SaleMap from './components/SaleMap.jsx'
 import SaleThumb from './components/SaleThumb.jsx'
 import { loadState, saveState, writeFullState, upsertSale, removeSale, defaultInterests } from './lib/storage.js'
@@ -147,6 +147,25 @@ function matchSummaryLine(score, _matches) {
   return 'No keyword matches yet'
 }
 
+/** Friendlier geocode errors + concrete next steps. */
+function geocodeUserMessage(raw, addressLine) {
+  const base = String(raw || 'Something went wrong finding that address.')
+  const msg = base.toLowerCase()
+  const addr = String(addressLine || '').trim()
+  const parts = addr.split(',').map((x) => x.trim()).filter(Boolean)
+  const suggestZip = !/\b\d{5}(-\d{4})?\b/.test(addr) ? ' Add a ZIP code if you can.' : ''
+  const suggestCity = parts.length < 2 ? ' Include city and state (or town).' : ''
+
+  if (msg.includes('type an address') || msg.includes('empty')) return base
+  if (msg.includes('no match') || msg.includes('no results')) {
+    return `${base}${suggestZip || suggestCity || ' Try a nearby cross street or town name.'}`
+  }
+  if (msg.includes('look up') || msg.includes('try again')) {
+    return `${base} Check spelling; add city, state, and ZIP when possible.`
+  }
+  return base
+}
+
 export default function App() {
   const [home, setHome] = useState(null)
   const [homeInput, setHomeInput] = useState('')
@@ -168,6 +187,28 @@ export default function App() {
   /** Which sale cards have open `<details>` (key present and true). */
   const [saleCardOpen, setSaleCardOpen] = useState({})
   const [geocodingSaleId, setGeocodingSaleId] = useState(null)
+  const [offline, setOffline] = useState(() => (typeof navigator !== 'undefined' ? !navigator.onLine : false))
+  const [undoDeleteLabel, setUndoDeleteLabel] = useState(null)
+  const undoSaleRef = useRef(null)
+  const undoBlobRef = useRef(null)
+  const undoTimerRef = useRef(null)
+
+  const clearUndoTimer = useCallback(() => {
+    if (undoTimerRef.current) {
+      clearTimeout(undoTimerRef.current)
+      undoTimerRef.current = null
+    }
+  }, [])
+
+  const scheduleUndoExpiry = useCallback(() => {
+    clearUndoTimer()
+    undoTimerRef.current = setTimeout(() => {
+      setUndoDeleteLabel(null)
+      undoSaleRef.current = null
+      undoBlobRef.current = null
+      undoTimerRef.current = null
+    }, 12000)
+  }, [clearUndoTimer])
 
   useEffect(() => {
     const s = loadState()
@@ -188,6 +229,21 @@ export default function App() {
     }
   }, [globalPhotoBusy])
 
+  useEffect(() => {
+    const on = () => setOffline(false)
+    const off = () => setOffline(true)
+    window.addEventListener('online', on)
+    window.addEventListener('offline', off)
+    return () => {
+      window.removeEventListener('online', on)
+      window.removeEventListener('offline', off)
+    }
+  }, [])
+
+  useEffect(() => {
+    return () => clearUndoTimer()
+  }, [clearUndoTimer])
+
   const persist = useCallback(
     (patch) => {
       const next = saveState(patch)
@@ -207,7 +263,7 @@ export default function App() {
       const h = { lat: g.lat, lon: g.lon, label: g.displayName }
       persist({ home: h })
     } catch (e) {
-      setError(e.message || String(e))
+      setError(geocodeUserMessage(e.message, homeInput))
     } finally {
       setBusy(null)
     }
@@ -317,12 +373,30 @@ export default function App() {
       })
       setSaleCardOpen((prev) => ({ ...prev, [id]: false }))
     } catch (e) {
-      setError(e.message || String(e))
+      setError(geocodeUserMessage(e.message, s.addressQuery))
     } finally {
       setBusy(null)
       setGeocodingSaleId(null)
     }
   }
+
+  const undoDeleteSale = useCallback(async () => {
+    const sale = undoSaleRef.current
+    const blob = undoBlobRef.current
+    if (!sale) return
+    clearUndoTimer()
+    setUndoDeleteLabel(null)
+    undoSaleRef.current = null
+    undoBlobRef.current = null
+    setError(null)
+    try {
+      if (blob) await putSaleImage(sale.id, blob)
+      persist({ sales: upsertSale(loadState().sales, sale) })
+      setRouteResult(null)
+    } catch (err) {
+      setError(err.message || String(err))
+    }
+  }, [clearUndoTimer, persist])
 
   const reparseSale = async (id) => {
     setError(null)
@@ -369,8 +443,11 @@ export default function App() {
       persist({ sales: upsertSale(state.sales, next) })
       setRouteResult(null)
       if (aiError) {
+        const nowOffline = typeof navigator !== 'undefined' && !navigator.onLine
         setError(
-          "Extra smart read didn't run online, but the text from your photo was refreshed. Check your connection or try again later.",
+          nowOffline
+            ? "You're offline, so the smart reader couldn't run. Text from your photo was still refreshed; try again when you're online for better addresses and times."
+            : "The smart reader didn't finish (weak signal or server busy). Text from your photo was still refreshed—try again in a moment.",
         )
       }
     } catch (e) {
@@ -451,7 +528,9 @@ export default function App() {
     setRouteResult(null)
     setBusy(null)
     if (failed) {
-      setError(`Couldn't place ${failed} sale(s) on the map. Check those addresses and try again.`)
+      setError(
+        `Couldn't place ${failed} sale(s) on the map. Open each sale and add city, state, or ZIP, then try again.`,
+      )
     }
   }
 
@@ -517,6 +596,13 @@ export default function App() {
           route. Tell us what you’re hunting for (games, tools, jewelry…) and the best matches rise to the top.
         </p>
       </header>
+
+      {offline ? (
+        <div className="ysm-offline-banner" role="status">
+          You’re offline—you can still add photos and edit text. <strong>Map lookup</strong> and the{' '}
+          <strong>smart reader</strong> need internet when you’re back online.
+        </div>
+      ) : null}
 
       <main className="ysm-layout">
         <section style={{ padding: 20, borderRight: '1px solid #334155', overflow: 'auto' }}>
@@ -771,6 +857,21 @@ export default function App() {
               {home ? (
                 <div style={{ display: 'grid', gap: 8, marginTop: 12 }}>
                   <a
+                    href={buildGoogleMapsDirectionsUrl(home, routeResult.ordered.slice(0, 1))}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    style={{
+                      ...btn(),
+                      display: 'block',
+                      textAlign: 'center',
+                      textDecoration: 'none',
+                      background: '#1e40af',
+                      borderColor: '#2563eb',
+                    }}
+                  >
+                    Open only stop #1 in Google Maps
+                  </a>
+                  <a
                     href={buildGoogleMapsDirectionsUrl(home, routeResult.ordered)}
                     target="_blank"
                     rel="noopener noreferrer"
@@ -993,14 +1094,23 @@ export default function App() {
                           e.preventDefault()
                           e.stopPropagation()
                           ;(async () => {
-                            await deleteSaleImage(s.id)
-                            persist({ sales: removeSale(loadState().sales, s.id) })
-                            setRouteResult(null)
-                            setSaleCardOpen((prev) => {
-                              const next = { ...prev }
-                              delete next[s.id]
-                              return next
-                            })
+                            try {
+                              const blob = await getSaleImageBlob(s.id)
+                              undoSaleRef.current = JSON.parse(JSON.stringify(s))
+                              undoBlobRef.current = blob
+                              setUndoDeleteLabel((s.title || s.addressQuery || 'Sale').slice(0, 56))
+                              scheduleUndoExpiry()
+                              await deleteSaleImage(s.id)
+                              persist({ sales: removeSale(loadState().sales, s.id) })
+                              setRouteResult(null)
+                              setSaleCardOpen((prev) => {
+                                const next = { ...prev }
+                                delete next[s.id]
+                                return next
+                              })
+                            } catch (err) {
+                              setError(err.message || String(err))
+                            }
                           })()
                         }}
                         style={{ ...btnGhost(), flexShrink: 0 }}
@@ -1125,6 +1235,15 @@ export default function App() {
           )}
         </section>
       </main>
+
+      {undoDeleteLabel ? (
+        <div className="ysm-undo-snack" role="status">
+          <span className="ysm-undo-snack-text">Removed “{undoDeleteLabel}”.</span>
+          <button type="button" className="ysm-undo-snack-btn" onClick={() => undoDeleteSale()}>
+            Undo
+          </button>
+        </div>
+      ) : null}
     </div>
   )
 }
