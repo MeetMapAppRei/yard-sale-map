@@ -430,9 +430,9 @@ export default function App() {
           <p style={{ fontSize: 12, color: '#64748b', margin: '8px 0 0' }}>
             OCR runs on your original file for accuracy; stored copies are resized JPEGs in IndexedDB to save space. Listing
             fields live in localStorage.
-            After you deploy to Vercel and set <code style={{ color: '#cbd5e1' }}>OPENAI_API_KEY</code>, uploads also call
-            the server <code style={{ color: '#cbd5e1' }}>/api/parse-screenshot</code> for richer address and times (optional;
-            plain <code style={{ color: '#cbd5e1' }}>npm run dev</code> stays OCR-only).
+            After you deploy to Vercel and set <code style={{ color: '#cbd5e1' }}>ANTHROPIC_API_KEY</code>, uploads also call
+            the server <code style={{ color: '#cbd5e1' }}>/api/parse-screenshot</code> (Claude vision) for richer address and times
+            (optional; plain <code style={{ color: '#cbd5e1' }}>npm run dev</code> stays OCR-only).
           </p>
 
           <h2 style={{ fontSize: '1rem', margin: '24px 0 10px' }}>Interests (priority)</h2>

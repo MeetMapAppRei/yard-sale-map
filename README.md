@@ -23,7 +23,7 @@ You need a **public HTTPS URL**. Recommended: **Vercel** (free tier is enough fo
 3. Go to [vercel.com/new](https://vercel.com/new) → **Import** that repository.
 4. Leave defaults: **Framework Preset: Vite**, **Build Command** `npm run build`, **Output** `dist`.
 5. Under **Environment Variables**, add:
-   - `OPENAI_API_KEY` — your OpenAI key (optional; without it, OCR-only still works).
+   - `ANTHROPIC_API_KEY` — your Anthropic key (optional; without it, OCR-only still works).
 6. Click **Deploy**. Your app is live at `https://something.vercel.app`.
 
 Every future `git push` to `main` can auto-deploy (enable in Vercel → Project → Settings → Git).
@@ -35,7 +35,7 @@ npm i -g vercel
 cd /path/to/yard-sale-map
 vercel login
 vercel link
-vercel env pull   # optional; set OPENAI_API_KEY in Vercel dashboard
+vercel env pull   # optional; set ANTHROPIC_API_KEY in Vercel dashboard
 vercel --prod
 ```
 
@@ -74,8 +74,8 @@ npx vercel dev
 
 | Name | Required | Purpose |
 |------|----------|---------|
-| `OPENAI_API_KEY` | No | `/api/parse-screenshot` vision parsing |
-| `OPENAI_VISION_MODEL` | No | Default `gpt-4o-mini` |
+| `ANTHROPIC_API_KEY` | No | `/api/parse-screenshot` (Claude vision) |
+| `ANTHROPIC_MODEL` | No | Default `claude-3-5-haiku-20241022` (e.g. `claude-3-5-sonnet-20241022`) |
 
 Geocoding uses `/api/geocode` (Nominatim) on the server — no extra key.
 

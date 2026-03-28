@@ -47,8 +47,8 @@ git push -u origin main
 7. **Output Directory** — should be `dist` (default for Vite).
 8. Click **Environment Variables** (expand if collapsed).
 9. Add:
-   - **Name:** `OPENAI_API_KEY`  
-   - **Value:** your OpenAI API key (from platform.openai.com) — **optional**; skip if you only want OCR.
+   - **Name:** `ANTHROPIC_API_KEY`  
+   - **Value:** your Anthropic API key (from console.anthropic.com) — **optional**; skip if you only want OCR.
 10. Select **Production**, **Preview**, and **Development** for that variable (or at least **Production**).
 11. Click **Deploy**.
 12. Wait until the build finishes (green check). Click **Visit** or copy the URL that looks like **`https://yard-sale-map-xxxxx.vercel.app`**.
@@ -82,7 +82,7 @@ You can now open the app like any other app. Maps and uploads need **internet**;
 
 - **Push rejected:** run `git push -u origin main` again after fixing GitHub auth.
 - **Vercel build failed:** open the failed deployment → **Building** logs; often a missing dependency — run `npm run build` locally in `yard-sale-map` and fix errors.
-- **Geocode or AI errors on the live site:** in Vercel → **Project** → **Settings** → **Environment Variables**, confirm `OPENAI_API_KEY` is set for Production, then **Redeploy** the latest deployment.
+- **Geocode or AI errors on the live site:** in Vercel → **Project** → **Settings** → **Environment Variables**, confirm `ANTHROPIC_API_KEY` is set for Production, then **Redeploy** the latest deployment.
 
 ---
 

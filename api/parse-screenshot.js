@@ -1,11 +1,20 @@
 /**
- * Vercel Node serverless: vision extract for yard/garage sale screenshots.
- * Set OPENAI_API_KEY in the Vercel project (or .env.local for `vercel dev`).
+ * Vercel Node serverless: vision extract via Anthropic Claude (screenshots).
+ * Set ANTHROPIC_API_KEY in Vercel (or .env.local for `vercel dev`).
  */
 
 function jsonResponse(res, status, body) {
   res.setHeader('Content-Type', 'application/json; charset=utf-8')
   res.status(status).send(JSON.stringify(body))
+}
+
+/** Anthropic accepts image/jpeg, image/png, image/gif, image/webp */
+function normalizeMediaType(mime) {
+  const m = String(mime || '').toLowerCase()
+  if (m.includes('png')) return 'image/png'
+  if (m.includes('gif')) return 'image/gif'
+  if (m.includes('webp')) return 'image/webp'
+  return 'image/jpeg'
 }
 
 export default async function handler(req, res) {
@@ -18,10 +27,11 @@ export default async function handler(req, res) {
     return jsonResponse(res, 405, { error: 'Method not allowed' })
   }
 
-  const key = process.env.OPENAI_API_KEY
+  const key = process.env.ANTHROPIC_API_KEY
   if (!key) {
     return jsonResponse(res, 503, {
-      error: 'Server missing OPENAI_API_KEY. Add it in Vercel env or run vercel dev with .env.local.',
+      error:
+        'Server missing ANTHROPIC_API_KEY. Add it in Vercel → Environment Variables (or .env.local for vercel dev).',
     })
   }
 
@@ -35,7 +45,7 @@ export default async function handler(req, res) {
   }
 
   const imageBase64 = body?.imageBase64
-  const mimeType = body?.mimeType || 'image/jpeg'
+  const mimeType = normalizeMediaType(body?.mimeType)
   if (!imageBase64 || typeof imageBase64 !== 'string') {
     return jsonResponse(res, 400, { error: 'Missing imageBase64' })
   }
@@ -46,7 +56,7 @@ export default async function handler(req, res) {
   }
 
   const system =
-    'You extract yard sale, garage sale, and estate sale listings from screenshots. Reply with ONLY valid JSON, no markdown.'
+    'You extract yard sale, garage sale, and estate sale listings from screenshots. Reply with ONLY valid JSON, no markdown or code fences.'
 
   const userText = `Extract these fields for the flyer/post in the image:
 - title: short human title (e.g. "Multi-family sale")
@@ -58,29 +68,36 @@ export default async function handler(req, res) {
 JSON shape exactly:
 {"title":"","address_line":"","open_time_24h":null,"close_time_24h":null,"summary_text":""}`
 
+  const model = process.env.ANTHROPIC_MODEL || 'claude-3-5-haiku-20241022'
+
   try {
-    const openaiRes = await fetch('https://api.openai.com/v1/chat/completions', {
+    const anthropicRes = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${key}`,
-        'Content-Type': 'application/json',
+        'x-api-key': key,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json',
       },
       body: JSON.stringify({
-        model: process.env.OPENAI_VISION_MODEL || 'gpt-4o-mini',
-        max_tokens: 900,
+        model,
+        max_tokens: 1024,
         temperature: 0.2,
+        system,
         messages: [
-          { role: 'system', content: system },
           {
             role: 'user',
             content: [
-              { type: 'text', text: userText },
               {
-                type: 'image_url',
-                image_url: {
-                  url: `data:${mimeType};base64,${imageBase64}`,
-                  detail: 'high',
+                type: 'image',
+                source: {
+                  type: 'base64',
+                  media_type: mimeType,
+                  data: imageBase64,
                 },
+              },
+              {
+                type: 'text',
+                text: userText,
               },
             ],
           },
@@ -88,27 +105,34 @@ JSON shape exactly:
       }),
     })
 
-    const raw = await openaiRes.text()
+    const raw = await anthropicRes.text()
     let data
     try {
       data = JSON.parse(raw)
     } catch {
-      return jsonResponse(res, 502, { error: 'OpenAI returned non-JSON', detail: raw.slice(0, 200) })
+      return jsonResponse(res, 502, { error: 'Anthropic returned non-JSON', detail: raw.slice(0, 200) })
     }
 
-    if (!openaiRes.ok) {
-      return jsonResponse(res, 502, {
-        error: data?.error?.message || data?.error || 'OpenAI request failed',
-      })
+    if (!anthropicRes.ok) {
+      const msg = data?.error?.message || data?.error?.type || JSON.stringify(data?.error) || 'Anthropic request failed'
+      return jsonResponse(res, 502, { error: msg })
     }
 
-    const content = data?.choices?.[0]?.message?.content
-    if (!content || typeof content !== 'string') {
+    const blocks = data?.content
+    const textOut =
+      Array.isArray(blocks)
+        ? blocks
+            .filter((b) => b?.type === 'text')
+            .map((b) => b.text)
+            .join('\n')
+        : ''
+
+    if (!textOut || typeof textOut !== 'string') {
       return jsonResponse(res, 502, { error: 'Empty model response' })
     }
 
     let parsed
-    const trimmed = content.trim()
+    const trimmed = textOut.trim()
     const jsonMatch = trimmed.match(/\{[\s\S]*\}/)
     try {
       parsed = JSON.parse(jsonMatch ? jsonMatch[0] : trimmed)
