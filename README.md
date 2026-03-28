@@ -2,6 +2,8 @@
 
 Screenshot uploads → OCR (+ optional AI) → geocode → map, interest priority, and driving routes. **Install on your phone** (PWA) and use **HTTPS** everywhere so location and APIs work on the move.
 
+**Step-by-step (every click):** see **[DEPLOY-CLICK-BY-CLICK.md](./DEPLOY-CLICK-BY-CLICK.md)**.
+
 ## Deploy once — use anywhere (phone, LTE, coffee shop Wi‑Fi)
 
 You need a **public HTTPS URL**. Recommended: **Vercel** (free tier is enough for personal use).
