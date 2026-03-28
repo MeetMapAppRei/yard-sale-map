@@ -677,7 +677,7 @@ export default function App() {
             <input type="file" accept="image/*" multiple onChange={onUpload} style={{ display: 'none' }} />
           </label>
           <p style={{ fontSize: 13, color: '#94a3b8', margin: '8px 0 0', lineHeight: 1.45 }}>
-            You can select several photos at once. Use <strong>Sort list</strong> on the right to order by newest, distance,
+            You can select several photos at once. Use <strong>Sort list</strong> under the map to order by newest, distance,
             open time, matches, or title.
           </p>
 
@@ -948,23 +948,6 @@ export default function App() {
             >
               Put all on map
             </button>
-            <label style={{ ...labelSmall(), flex: '1 1 200px', minWidth: 180 }}>
-              Sort list
-              <select
-                value={settings.listSortMode || 'newest'}
-                onChange={(e) => {
-                  persist({ settings: { ...settings, listSortMode: e.target.value } })
-                  setRouteResult(null)
-                }}
-                style={inp()}
-              >
-                <option value="newest">Newest added</option>
-                <option value="distance">Distance (nearest first)</option>
-                <option value="opens">Opens soonest</option>
-                <option value="match">Best keyword matches</option>
-                <option value="title">Title (A–Z)</option>
-              </select>
-            </label>
           </div>
 
           <SaleMap
@@ -973,6 +956,24 @@ export default function App() {
             routeLegs={routeResult?.legs}
             radiusMiles={home ? settings.searchRadiusMiles : 0}
           />
+
+          <label style={{ ...labelSmall(), display: 'block', marginTop: 14 }}>
+            Sort list
+            <select
+              value={settings.listSortMode || 'newest'}
+              onChange={(e) => {
+                persist({ settings: { ...settings, listSortMode: e.target.value } })
+                setRouteResult(null)
+              }}
+              style={inp()}
+            >
+              <option value="newest">Newest added</option>
+              <option value="distance">Distance (nearest first)</option>
+              <option value="opens">Opens soonest</option>
+              <option value="match">Best keyword matches</option>
+              <option value="title">Title (A–Z)</option>
+            </select>
+          </label>
 
           <h2 style={{ fontSize: '1rem', margin: '20px 0 10px' }}>
             Your sales ({displayedSales.length}
