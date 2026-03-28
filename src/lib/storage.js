@@ -1,5 +1,11 @@
 const KEY = 'yard-sale-map-v1'
 
+const LIST_SORT_MODES = new Set(['newest', 'distance', 'opens', 'match', 'title'])
+
+export function normalizeListSortMode(v) {
+  return LIST_SORT_MODES.has(v) ? v : 'newest'
+}
+
 function loadRaw() {
   try {
     const raw = localStorage.getItem(KEY)
@@ -17,7 +23,13 @@ export function loadState() {
       home: null,
       sales: [],
       interests: defaultInterests(),
-      settings: { avgKmh: 40, dwellMinutes: 20, searchRadiusMiles: 50, showPriorityOnly: false },
+      settings: {
+        avgKmh: 40,
+        dwellMinutes: 20,
+        searchRadiusMiles: 50,
+        showPriorityOnly: false,
+        listSortMode: 'newest',
+      },
     }
   }
   return {
@@ -29,6 +41,7 @@ export function loadState() {
       dwellMinutes: Number(raw.settings?.dwellMinutes) || 20,
       searchRadiusMiles: Number(raw.settings?.searchRadiusMiles) || 50,
       showPriorityOnly: Boolean(raw.settings?.showPriorityOnly),
+      listSortMode: normalizeListSortMode(raw.settings?.listSortMode),
     },
   }
 }
@@ -51,6 +64,7 @@ export function writeFullState(state) {
       dwellMinutes: Number(state.settings?.dwellMinutes) || 20,
       searchRadiusMiles: Number(state.settings?.searchRadiusMiles) || 50,
       showPriorityOnly: Boolean(state.settings?.showPriorityOnly),
+      listSortMode: normalizeListSortMode(state.settings?.listSortMode),
     },
   }
   localStorage.setItem(KEY, JSON.stringify(normalized))

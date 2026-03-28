@@ -83,8 +83,57 @@ async function processScreenshotFile(file, interestRows, createdAtOffset = 0) {
   }
 }
 
-function sortSalesByNewestFirst(sales) {
-  return [...sales].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
+function sortSalesForList(sales, mode, home) {
+  const list = [...sales]
+  const newest = (a, b) => (b.createdAt || 0) - (a.createdAt || 0)
+
+  if (mode === 'match') {
+    list.sort((a, b) => {
+      const pa = Number(a.priorityScore) || 0
+      const pb = Number(b.priorityScore) || 0
+      if (pb !== pa) return pb - pa
+      return newest(a, b)
+    })
+    return list
+  }
+  if (mode === 'opens') {
+    list.sort((a, b) => {
+      const oa = a.openMinutes
+      const ob = b.openMinutes
+      const na = oa == null || Number.isNaN(oa) ? 99999 : oa
+      const nb = ob == null || Number.isNaN(ob) ? 99999 : ob
+      if (na !== nb) return na - nb
+      return newest(a, b)
+    })
+    return list
+  }
+  if (mode === 'distance') {
+    list.sort((a, b) => {
+      const da =
+        home && a.lat != null && a.lon != null
+          ? haversineKm(home.lat, home.lon, a.lat, a.lon)
+          : Infinity
+      const db =
+        home && b.lat != null && b.lon != null
+          ? haversineKm(home.lat, home.lon, b.lat, b.lon)
+          : Infinity
+      if (da !== db) return da - db
+      return newest(a, b)
+    })
+    return list
+  }
+  if (mode === 'title') {
+    list.sort((a, b) => {
+      const sa = String(a.title || a.addressQuery || '').toLowerCase()
+      const sb = String(b.title || b.addressQuery || '').toLowerCase()
+      const c = sa.localeCompare(sb, undefined, { sensitivity: 'base' })
+      if (c !== 0) return c
+      return newest(a, b)
+    })
+    return list
+  }
+  list.sort(newest)
+  return list
 }
 
 function kmToMiles(km) {
@@ -108,6 +157,7 @@ export default function App() {
     dwellMinutes: 20,
     searchRadiusMiles: 50,
     showPriorityOnly: false,
+    listSortMode: 'newest',
   })
   const [startTime, setStartTime] = useState('08:00')
   const [routeResult, setRouteResult] = useState(null)
@@ -224,8 +274,7 @@ export default function App() {
         return
       }
 
-      const orderedNew = sortSalesByNewestFirst(newSales)
-      const combined = [...orderedNew, ...loadState().sales]
+      const combined = [...loadState().sales, ...newSales]
       persist({ sales: combined })
       setRouteResult(null)
       if (failures.length) {
@@ -341,12 +390,15 @@ export default function App() {
     setRouteResult(null)
   }
 
-  const salesOrderedByNewest = useMemo(() => sortSalesByNewestFirst(sales), [sales])
+  const salesSortedForList = useMemo(
+    () => sortSalesForList(sales, settings.listSortMode || 'newest', home),
+    [sales, settings.listSortMode, home],
+  )
 
   const displayedSales = useMemo(() => {
-    if (!settings.showPriorityOnly) return salesOrderedByNewest
-    return salesOrderedByNewest.filter((s) => (Number(s.priorityScore) || 0) > 0)
-  }, [salesOrderedByNewest, settings.showPriorityOnly])
+    if (!settings.showPriorityOnly) return salesSortedForList
+    return salesSortedForList.filter((s) => (Number(s.priorityScore) || 0) > 0)
+  }, [salesSortedForList, settings.showPriorityOnly])
 
   const runPlan = () => {
     setError(null)
@@ -539,7 +591,8 @@ export default function App() {
             <input type="file" accept="image/*" multiple onChange={onUpload} style={{ display: 'none' }} />
           </label>
           <p style={{ fontSize: 13, color: '#94a3b8', margin: '8px 0 0', lineHeight: 1.45 }}>
-            You can select several photos at once. The newest sales always appear at the top of your list.
+            You can select several photos at once. Use <strong>Sort list</strong> on the right to order by newest, distance,
+            open time, matches, or title.
           </p>
 
           <h2 style={{ fontSize: '1rem', margin: '24px 0 10px' }}>What you’re looking for</h2>
@@ -794,6 +847,23 @@ export default function App() {
             >
               Put all on map
             </button>
+            <label style={{ ...labelSmall(), flex: '1 1 200px', minWidth: 180 }}>
+              Sort list
+              <select
+                value={settings.listSortMode || 'newest'}
+                onChange={(e) => {
+                  persist({ settings: { ...settings, listSortMode: e.target.value } })
+                  setRouteResult(null)
+                }}
+                style={inp()}
+              >
+                <option value="newest">Newest added</option>
+                <option value="distance">Distance (nearest first)</option>
+                <option value="opens">Opens soonest</option>
+                <option value="match">Best keyword matches</option>
+                <option value="title">Title (A–Z)</option>
+              </select>
+            </label>
           </div>
 
           <SaleMap
