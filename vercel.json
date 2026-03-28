@@ -1,0 +1,10 @@
+{
+  "functions": {
+    "api/parse-screenshot.js": {
+      "maxDuration": 60
+    },
+    "api/geocode.js": {
+      "maxDuration": 15
+    }
+  }
+}
