@@ -123,6 +123,7 @@ export default function App() {
   /** Which sale cards have open `<details>` (key present and true). */
   const [saleCardOpen, setSaleCardOpen] = useState({})
   const [mapJustAddedId, setMapJustAddedId] = useState(null)
+  const [geocodingSaleId, setGeocodingSaleId] = useState(null)
   const mapFlashTimeoutRef = useRef(null)
 
   useEffect(() => {
@@ -274,6 +275,7 @@ export default function App() {
     const s = loadState().sales.find((x) => x.id === id)
     if (!s?.addressQuery?.trim()) return
     setError(null)
+    setGeocodingSaleId(id)
     setBusy('Putting this sale on the map…')
     try {
       const g = await geocodeAddress(s.addressQuery)
@@ -293,6 +295,7 @@ export default function App() {
       setError(e.message || String(e))
     } finally {
       setBusy(null)
+      setGeocodingSaleId(null)
     }
   }
 
@@ -392,22 +395,27 @@ export default function App() {
     setBusy(`Finding ${missing.length} addresses on the map…`)
     const nextSales = [...state.sales]
     let failed = 0
-    for (const sale of missing) {
-      try {
-        const g = await geocodeAddress(sale.addressQuery)
-        const i = nextSales.findIndex((x) => x.id === sale.id)
-        if (i >= 0) {
-          nextSales[i] = {
-            ...nextSales[i],
-            lat: g.lat,
-            lon: g.lon,
-            displayName: g.displayName,
+    try {
+      for (const sale of missing) {
+        setGeocodingSaleId(sale.id)
+        try {
+          const g = await geocodeAddress(sale.addressQuery)
+          const i = nextSales.findIndex((x) => x.id === sale.id)
+          if (i >= 0) {
+            nextSales[i] = {
+              ...nextSales[i],
+              lat: g.lat,
+              lon: g.lon,
+              displayName: g.displayName,
+            }
           }
+          setSaleCardOpen((prev) => ({ ...prev, [sale.id]: false }))
+        } catch {
+          failed += 1
         }
-        setSaleCardOpen((prev) => ({ ...prev, [sale.id]: false }))
-      } catch {
-        failed += 1
       }
+    } finally {
+      setGeocodingSaleId(null)
     }
     persist({ sales: nextSales })
     setRouteResult(null)
@@ -903,27 +911,56 @@ export default function App() {
                         </div>
                       ) : null}
                     </div>
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.preventDefault()
-                        e.stopPropagation()
-                        ;(async () => {
-                          await deleteSaleImage(s.id)
-                          persist({ sales: removeSale(loadState().sales, s.id) })
-                          setRouteResult(null)
-                          setSaleCardOpen((prev) => {
-                            const next = { ...prev }
-                            delete next[s.id]
-                            return next
-                          })
-                          setMapJustAddedId((cur) => (cur === s.id ? null : cur))
-                        })()
+                    <div
+                      style={{
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: 6,
+                        flexShrink: 0,
+                        alignItems: 'stretch',
+                        width: 108,
+                        marginTop: 2,
                       }}
-                      style={{ ...btnGhost(), flexShrink: 0, marginTop: 2 }}
                     >
-                      Delete
-                    </button>
+                      <button
+                        type="button"
+                        className={`ysm-summary-map-btn${geocodingSaleId === s.id ? ' ysm-summary-map-btn--working' : ''}`}
+                        onClick={(e) => {
+                          e.preventDefault()
+                          e.stopPropagation()
+                          geocodeSale(s.id)
+                        }}
+                        disabled={
+                          !s.addressQuery?.trim() ||
+                          !!busySaleId ||
+                          geocodingSaleId === s.id ||
+                          (!!busy && geocodingSaleId !== s.id)
+                        }
+                      >
+                        {geocodingSaleId === s.id ? 'Working…' : 'Put on map'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.preventDefault()
+                          e.stopPropagation()
+                          ;(async () => {
+                            await deleteSaleImage(s.id)
+                            persist({ sales: removeSale(loadState().sales, s.id) })
+                            setRouteResult(null)
+                            setSaleCardOpen((prev) => {
+                              const next = { ...prev }
+                              delete next[s.id]
+                              return next
+                            })
+                            setMapJustAddedId((cur) => (cur === s.id ? null : cur))
+                          })()
+                        }}
+                        style={{ ...btnGhost(), flexShrink: 0 }}
+                      >
+                        Delete
+                      </button>
+                    </div>
                   </summary>
                   <div className="ysm-sale-body">
                     <SaleThumb saleId={s.id} />
@@ -939,7 +976,12 @@ export default function App() {
                       <button
                         type="button"
                         onClick={() => geocodeSale(s.id)}
-                        disabled={!!busy || !!busySaleId}
+                        disabled={
+                          !s.addressQuery?.trim() ||
+                          !!busySaleId ||
+                          geocodingSaleId === s.id ||
+                          (!!busy && geocodingSaleId !== s.id)
+                        }
                         style={btn()}
                       >
                         Put on map

@@ -217,3 +217,54 @@ details.ysm-subdetails > summary {
   transition: width 0.35s ease-out;
 }
 
+/* Collapsed sale row: Put on map stacked above Delete */
+.ysm-summary-map-btn {
+  padding: 8px 6px;
+  border-radius: 8px;
+  border: 2px solid #64748b;
+  background: #1e293b;
+  color: #f8fafc;
+  font-weight: 700;
+  font-size: 12px;
+  line-height: 1.25;
+  text-align: center;
+  transition:
+    background 0.1s ease,
+    color 0.1s ease,
+    border-color 0.1s ease,
+    transform 0.08s ease;
+}
+
+.ysm-summary-map-btn:not(:disabled):hover {
+  background: #334155;
+  border-color: #94a3b8;
+  color: #ffffff;
+}
+
+.ysm-summary-map-btn:not(:disabled):active {
+  background: #facc15;
+  color: #0f172a;
+  border-color: #a16207;
+  transform: scale(0.98);
+}
+
+.ysm-summary-map-btn:focus-visible {
+  outline: 3px solid #facc15;
+  outline-offset: 2px;
+}
+
+.ysm-summary-map-btn:disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
+}
+
+.ysm-summary-map-btn.ysm-summary-map-btn--working,
+.ysm-summary-map-btn.ysm-summary-map-btn--working:disabled {
+  opacity: 1;
+  cursor: wait;
+  background: #facc15;
+  color: #0f172a;
+  border-color: #854d0e;
+  box-shadow: inset 0 0 0 1px #0f172a;
+}
+
