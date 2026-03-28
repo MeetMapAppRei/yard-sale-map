@@ -78,3 +78,68 @@ details.ysm-details[open] summary {
   margin-bottom: 10px;
 }
 
+/* One sale = one collapsible card */
+details.ysm-sale-card {
+  margin-bottom: 12px;
+  border: 1px solid #334155;
+  border-radius: 12px;
+  background: #0f172a;
+  overflow: hidden;
+}
+
+details.ysm-sale-card.ysm-sale-out {
+  background: #1e293b;
+}
+
+details.ysm-sale-card > summary {
+  list-style: none;
+  cursor: pointer;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 14px 14px;
+  min-height: 52px;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+details.ysm-sale-card > summary::-webkit-details-marker {
+  display: none;
+}
+
+details.ysm-sale-card > summary::before {
+  content: '▸';
+  flex-shrink: 0;
+  width: 1.25rem;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.5;
+  margin-top: 3px;
+}
+
+details.ysm-sale-card[open] > summary::before {
+  content: '▾';
+}
+
+details.ysm-sale-card > summary:hover {
+  background: rgba(51, 65, 85, 0.35);
+}
+
+details.ysm-sale-card .ysm-sale-body {
+  padding: 0 14px 14px;
+  border-top: 1px solid #1e293b;
+}
+
+details.ysm-subdetails {
+  margin-top: 10px;
+  border-style: dashed;
+  opacity: 0.92;
+}
+
+details.ysm-subdetails > summary {
+  font-weight: 500;
+  font-size: 13px;
+  color: #94a3b8;
+}
+

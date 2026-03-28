@@ -484,9 +484,7 @@ export default function App() {
             <input type="file" accept="image/*" multiple onChange={onUpload} style={{ display: 'none' }} />
           </label>
           <p style={{ fontSize: 13, color: '#94a3b8', margin: '8px 0 0', lineHeight: 1.45 }}>
-            Pick <strong>one or many</strong> at a time (in your gallery, use multi-select). We read the text from each
-            photo, and when you’re online we also use a smart reader for better addresses and times. New batches are sorted
-            with your best keyword matches first and appear at the top of your list.
+            You can select several photos at once. New sales appear at the top, with your best keyword matches first.
           </p>
 
           <h2 style={{ fontSize: '1rem', margin: '24px 0 10px' }}>What you’re looking for</h2>
@@ -751,12 +749,15 @@ export default function App() {
           />
 
           <h2 style={{ fontSize: '1rem', margin: '20px 0 10px' }}>
-            Listings ({displayedSales.length}
+            Your sales ({displayedSales.length}
             {settings.showPriorityOnly && sales.length !== displayedSales.length
               ? ` of ${sales.length}`
               : ''}
             )
           </h2>
+          <p style={{ fontSize: 13, color: '#64748b', margin: '-4px 0 12px', lineHeight: 1.45 }}>
+            Tap a row to open details, map links, and hours.
+          </p>
           {sales.length === 0 ? (
             <p style={{ color: '#64748b', fontSize: 14 }}>No sales yet. Add some photos to get started.</p>
           ) : displayedSales.length === 0 ? (
@@ -764,147 +765,182 @@ export default function App() {
               Nothing matches your keywords. Turn off “Only sales that match my keywords” or add different words.
             </p>
           ) : (
-            displayedSales.map((s, idx) => (
-              <article
-                key={s.id}
-                style={{
-                  marginBottom: 14,
-                  padding: 12,
-                  borderRadius: 10,
-                  border: '1px solid #334155',
-                  background: withinRadius[idx] ? '#0f172a' : '#1e293b',
-                  opacity: withinRadius[idx] || !home ? 1 : 0.65,
-                }}
-              >
-                <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'flex-start' }}>
-                  <strong style={{ fontSize: 15 }}>{s.title}</strong>
-                  <button
-                    type="button"
-                    onClick={async () => {
-                      await deleteSaleImage(s.id)
-                      persist({ sales: removeSale(loadState().sales, s.id) })
-                      setRouteResult(null)
-                    }}
-                    style={btnGhost()}
-                  >
-                    Delete
-                  </button>
-                </div>
-                <div style={{ fontSize: 13, color: '#94a3b8', marginTop: 6, lineHeight: 1.4 }}>
-                  <span style={{ color: '#e2e8f0' }}>{matchSummaryLine(s.priorityScore, s.interestMatches)}</span>
-                  {s.interestMatches?.length ? (
-                    <span>
-                      {' '}
-                      · Found: {s.interestMatches.map((m) => m.keyword).join(', ')}
-                    </span>
-                  ) : null}
-                  {home && s.lat != null ? (
-                    <span>
-                      {' '}
-                      · ~{kmToMiles(haversineKm(home.lat, home.lon, s.lat, s.lon)).toFixed(1)} mi away
-                    </span>
-                  ) : null}
-                </div>
-                <SaleThumb saleId={s.id} />
-                <label style={{ ...labelSmall(), marginTop: 8 }}>
-                  Address (fix if it looks wrong)
-                  <input
-                    value={s.addressQuery}
-                    onChange={(e) => updateSaleField(s.id, { addressQuery: e.target.value })}
-                    style={inp()}
-                  />
-                </label>
-                <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-                  <button type="button" onClick={() => geocodeSale(s.id)} disabled={busySaleId === s.id} style={btn()}>
-                    Put on map
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => reparseSale(s.id)}
-                    disabled={busySaleId === s.id}
-                    style={btnGhost()}
-                    title="Read this photo again for better text"
-                  >
-                    {busySaleId === s.id ? 'Reading…' : 'Read photo again'}
-                  </button>
-                  {s.displayName ? (
-                    <span style={{ fontSize: 12, color: '#86efac', alignSelf: 'center' }}>On map</span>
-                  ) : null}
-                </div>
-                {s.lat != null && s.lon != null ? (
-                  <div
-                    style={{
-                      fontSize: 12,
-                      marginTop: 8,
-                      display: 'flex',
-                      gap: 14,
-                      flexWrap: 'wrap',
-                    }}
-                  >
-                    <a
-                      href={buildGoogleMapsPlaceUrl(s.lat, s.lon, s.title)}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      style={{ color: '#93c5fd' }}
+            displayedSales.map((s, idx) => {
+              const metaBits = []
+              if (s.displayName) metaBits.push('On map')
+              if (home && s.lat != null) {
+                metaBits.push(`~${kmToMiles(haversineKm(home.lat, home.lon, s.lat, s.lon)).toFixed(1)} mi`)
+              }
+              const metaLine = [
+                matchSummaryLine(s.priorityScore, s.interestMatches),
+                s.interestMatches?.length ? s.interestMatches.map((m) => m.keyword).join(', ') : null,
+                metaBits.length ? metaBits.join(' · ') : null,
+              ]
+                .filter(Boolean)
+                .join(' · ')
+
+              return (
+                <details
+                  key={s.id}
+                  className={`ysm-sale-card${withinRadius[idx] || !home ? '' : ' ysm-sale-out'}`}
+                  style={{
+                    opacity: withinRadius[idx] || !home ? 1 : 0.72,
+                  }}
+                >
+                  <summary>
+                    <div style={{ flex: 1, minWidth: 0, paddingRight: 4 }}>
+                      <div
+                        style={{
+                          fontWeight: 600,
+                          fontSize: 15,
+                          lineHeight: 1.3,
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          display: '-webkit-box',
+                          WebkitLineClamp: 2,
+                          WebkitBoxOrient: 'vertical',
+                        }}
+                      >
+                        {s.title}
+                      </div>
+                      <div
+                        style={{
+                          fontSize: 12,
+                          color: '#94a3b8',
+                          marginTop: 4,
+                          lineHeight: 1.35,
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        {metaLine}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.preventDefault()
+                        e.stopPropagation()
+                        ;(async () => {
+                          await deleteSaleImage(s.id)
+                          persist({ sales: removeSale(loadState().sales, s.id) })
+                          setRouteResult(null)
+                        })()
+                      }}
+                      style={{ ...btnGhost(), flexShrink: 0, marginTop: 2 }}
                     >
-                      Open in Google Maps
-                    </a>
-                    <a
-                      href={buildAppleMapsPlaceUrl(s.lat, s.lon, s.title)}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      style={{ color: '#93c5fd' }}
-                    >
-                      Open in Apple Maps
-                    </a>
-                  </div>
-                ) : null}
-                <details className="ysm-details" style={{ marginTop: 10 }}>
-                  <summary>Text read from the photo</summary>
-                  <textarea
-                    value={s.rawText}
-                    onChange={(e) => updateSaleField(s.id, { rawText: e.target.value, interestsRefresh: true })}
-                    rows={5}
-                    style={{ ...inp(), resize: 'vertical', fontSize: 15, marginTop: 8 }}
-                  />
-                </details>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 8 }}>
-                  <label style={labelSmall()}>
-                    Opens
-                    <input
-                      type="time"
-                      value={timeInputValue(s.openMinutes)}
-                      onChange={(e) =>
-                        updateSaleField(s.id, { openMinutes: parseTimeInputValue(e.target.value) })
-                      }
-                      style={inp()}
-                    />
-                  </label>
-                  <label style={labelSmall()}>
-                    Close (optional)
-                    <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 4 }}>
+                      Delete
+                    </button>
+                  </summary>
+                  <div className="ysm-sale-body">
+                    <SaleThumb saleId={s.id} />
+                    <label style={{ ...labelSmall(), marginTop: 10 }}>
+                      Address (fix if it looks wrong)
                       <input
-                        type="time"
-                        value={timeInputValue(s.closeMinutes)}
-                        onChange={(e) =>
-                          updateSaleField(s.id, {
-                            closeMinutes: e.target.value ? parseTimeInputValue(e.target.value) : null,
-                          })
-                        }
-                        style={{ ...inp(), marginTop: 0, flex: 1 }}
+                        value={s.addressQuery}
+                        onChange={(e) => updateSaleField(s.id, { addressQuery: e.target.value })}
+                        style={inp()}
                       />
+                    </label>
+                    <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap', alignItems: 'center' }}>
                       <button
                         type="button"
-                        onClick={() => updateSaleField(s.id, { closeMinutes: null })}
-                        style={btnGhost()}
+                        onClick={() => geocodeSale(s.id)}
+                        disabled={busySaleId === s.id}
+                        style={btn()}
                       >
-                        Clear
+                        Put on map
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => reparseSale(s.id)}
+                        disabled={busySaleId === s.id}
+                        style={btnGhost()}
+                        title="Read this photo again for better text"
+                      >
+                        {busySaleId === s.id ? 'Reading…' : 'Read photo again'}
                       </button>
                     </div>
-                  </label>
-                </div>
-              </article>
-            ))
+                    {s.lat != null && s.lon != null ? (
+                      <div
+                        style={{
+                          fontSize: 14,
+                          marginTop: 10,
+                          display: 'flex',
+                          gap: 16,
+                          flexWrap: 'wrap',
+                        }}
+                      >
+                        <a
+                          href={buildGoogleMapsPlaceUrl(s.lat, s.lon, s.title)}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          style={{ color: '#93c5fd', fontWeight: 500 }}
+                        >
+                          Google Maps
+                        </a>
+                        <a
+                          href={buildAppleMapsPlaceUrl(s.lat, s.lon, s.title)}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          style={{ color: '#93c5fd', fontWeight: 500 }}
+                        >
+                          Apple Maps
+                        </a>
+                      </div>
+                    ) : null}
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 12 }}>
+                      <label style={labelSmall()}>
+                        Opens
+                        <input
+                          type="time"
+                          value={timeInputValue(s.openMinutes)}
+                          onChange={(e) =>
+                            updateSaleField(s.id, { openMinutes: parseTimeInputValue(e.target.value) })
+                          }
+                          style={inp()}
+                        />
+                      </label>
+                      <label style={labelSmall()}>
+                        Close (optional)
+                        <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 4 }}>
+                          <input
+                            type="time"
+                            value={timeInputValue(s.closeMinutes)}
+                            onChange={(e) =>
+                              updateSaleField(s.id, {
+                                closeMinutes: e.target.value ? parseTimeInputValue(e.target.value) : null,
+                              })
+                            }
+                            style={{ ...inp(), marginTop: 0, flex: 1 }}
+                          />
+                          <button
+                            type="button"
+                            onClick={() => updateSaleField(s.id, { closeMinutes: null })}
+                            style={btnGhost()}
+                          >
+                            Clear
+                          </button>
+                        </div>
+                      </label>
+                    </div>
+                    <details className="ysm-details ysm-subdetails" style={{ marginTop: 12 }}>
+                      <summary>Advanced · full text from photo</summary>
+                      <p style={{ fontSize: 12, color: '#64748b', margin: '0 0 8px', lineHeight: 1.45 }}>
+                        Only open this if something looks wrong—you can fix the text here.
+                      </p>
+                      <textarea
+                        value={s.rawText}
+                        onChange={(e) => updateSaleField(s.id, { rawText: e.target.value, interestsRefresh: true })}
+                        rows={4}
+                        style={{ ...inp(), resize: 'vertical', fontSize: 15 }}
+                      />
+                    </details>
+                  </div>
+                </details>
+              )
+            })
           )}
         </section>
       </main>
