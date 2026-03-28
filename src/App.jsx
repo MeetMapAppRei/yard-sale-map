@@ -677,8 +677,8 @@ export default function App() {
             <input type="file" accept="image/*" multiple onChange={onUpload} style={{ display: 'none' }} />
           </label>
           <p style={{ fontSize: 13, color: '#94a3b8', margin: '8px 0 0', lineHeight: 1.45 }}>
-            You can select several photos at once. Use <strong>Sort list</strong> under the map to order by newest, distance,
-            open time, matches, or title.
+            You can select several photos at once. On the right: <strong>Sort list</strong> is under the map, then keyword
+            filter and <strong>Put all on map</strong>.
           </p>
 
           <h2 style={{ fontSize: '1rem', margin: '24px 0 10px' }}>What you’re looking for</h2>
@@ -911,13 +911,38 @@ export default function App() {
         </section>
 
         <section style={{ padding: 20, overflow: 'auto', background: '#0b1220' }}>
+          <SaleMap
+            home={home}
+            sales={displayedSales}
+            routeLegs={routeResult?.legs}
+            radiusMiles={home ? settings.searchRadiusMiles : 0}
+          />
+
+          <label style={{ ...labelSmall(), display: 'block', marginTop: 14 }}>
+            Sort list
+            <select
+              value={settings.listSortMode || 'newest'}
+              onChange={(e) => {
+                persist({ settings: { ...settings, listSortMode: e.target.value } })
+                setRouteResult(null)
+              }}
+              style={inp()}
+            >
+              <option value="newest">Newest added</option>
+              <option value="distance">Distance (nearest first)</option>
+              <option value="opens">Opens soonest</option>
+              <option value="match">Best keyword matches</option>
+              <option value="title">Title (A–Z)</option>
+            </select>
+          </label>
+
           <div
             style={{
               display: 'flex',
               flexWrap: 'wrap',
               gap: 12,
               alignItems: 'center',
-              marginBottom: 12,
+              marginTop: 14,
             }}
           >
             <label
@@ -949,31 +974,6 @@ export default function App() {
               Put all on map
             </button>
           </div>
-
-          <SaleMap
-            home={home}
-            sales={displayedSales}
-            routeLegs={routeResult?.legs}
-            radiusMiles={home ? settings.searchRadiusMiles : 0}
-          />
-
-          <label style={{ ...labelSmall(), display: 'block', marginTop: 14 }}>
-            Sort list
-            <select
-              value={settings.listSortMode || 'newest'}
-              onChange={(e) => {
-                persist({ settings: { ...settings, listSortMode: e.target.value } })
-                setRouteResult(null)
-              }}
-              style={inp()}
-            >
-              <option value="newest">Newest added</option>
-              <option value="distance">Distance (nearest first)</option>
-              <option value="opens">Opens soonest</option>
-              <option value="match">Best keyword matches</option>
-              <option value="title">Title (A–Z)</option>
-            </select>
-          </label>
 
           <h2 style={{ fontSize: '1rem', margin: '20px 0 10px' }}>
             Your sales ({displayedSales.length}
