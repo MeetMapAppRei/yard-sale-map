@@ -80,6 +80,7 @@ async function processScreenshotFile(file, interestRows, createdAtOffset = 0) {
     interestMatches: matches,
     createdAt: Date.now() + createdAtOffset,
     hasImage: true,
+    visitedAt: null,
   }
 }
 
@@ -147,6 +148,18 @@ function matchSummaryLine(score, _matches) {
   return 'No keyword matches yet'
 }
 
+function shortVisitLabel(ts) {
+  if (ts == null || Number.isNaN(ts)) return ''
+  return new Date(ts).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+}
+
+function saleVisitedWithinDays(s, days) {
+  if (!days || days <= 0) return false
+  const v = s.visitedAt
+  if (v == null || Number.isNaN(v)) return false
+  return Date.now() - v < days * 86400000
+}
+
 /** Friendlier geocode errors + concrete next steps. */
 function geocodeUserMessage(raw, addressLine) {
   const base = String(raw || 'Something went wrong finding that address.')
@@ -177,6 +190,7 @@ export default function App() {
     searchRadiusMiles: 50,
     showPriorityOnly: false,
     listSortMode: 'newest',
+    hideVisitedWithinDays: 0,
   })
   const [startTime, setStartTime] = useState('08:00')
   const [routeResult, setRouteResult] = useState(null)
@@ -473,9 +487,16 @@ export default function App() {
   )
 
   const displayedSales = useMemo(() => {
-    if (!settings.showPriorityOnly) return salesSortedForList
-    return salesSortedForList.filter((s) => (Number(s.priorityScore) || 0) > 0)
-  }, [salesSortedForList, settings.showPriorityOnly])
+    let list = salesSortedForList
+    if (settings.showPriorityOnly) {
+      list = list.filter((s) => (Number(s.priorityScore) || 0) > 0)
+    }
+    const hideDays = Number(settings.hideVisitedWithinDays) || 0
+    if (hideDays > 0) {
+      list = list.filter((s) => !saleVisitedWithinDays(s, hideDays))
+    }
+    return list
+  }, [salesSortedForList, settings.showPriorityOnly, settings.hideVisitedWithinDays])
 
   const runPlan = () => {
     setError(null)
@@ -936,60 +957,76 @@ export default function App() {
             </select>
           </label>
 
-          <div
-            style={{
-              display: 'flex',
-              flexWrap: 'wrap',
-              gap: 12,
-              alignItems: 'center',
-              marginTop: 14,
-            }}
-          >
-            <label
+          <div style={{ marginTop: 14 }}>
+            <div
               style={{
                 display: 'flex',
+                flexWrap: 'wrap',
+                gap: 12,
                 alignItems: 'center',
-                gap: 8,
-                fontSize: 14,
-                color: '#e2e8f0',
-                cursor: 'pointer',
               }}
             >
-              <input
-                type="checkbox"
-                checked={settings.showPriorityOnly}
+              <label
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  fontSize: 14,
+                  color: '#e2e8f0',
+                  cursor: 'pointer',
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={settings.showPriorityOnly}
+                  onChange={(e) => {
+                    persist({ settings: { ...settings, showPriorityOnly: e.target.checked } })
+                    setRouteResult(null)
+                  }}
+                />
+                Only sales that match my keywords
+              </label>
+              <button
+                type="button"
+                onClick={bulkGeocodeMissing}
+                style={btnGhost()}
+                disabled={!!busy || !!busySaleId}
+              >
+                Put all on map
+              </button>
+            </div>
+            <label style={{ ...labelSmall(), display: 'block', marginTop: 12 }}>
+              Visited sales
+              <select
+                value={String(settings.hideVisitedWithinDays ?? 0)}
                 onChange={(e) => {
-                  persist({ settings: { ...settings, showPriorityOnly: e.target.checked } })
+                  persist({ settings: { ...settings, hideVisitedWithinDays: Number(e.target.value) } })
                   setRouteResult(null)
                 }}
-              />
-              Only sales that match my keywords
+                style={inp()}
+              >
+                <option value="0">Show all (don’t hide visits)</option>
+                <option value="7">Hide if visited in the last 7 days</option>
+                <option value="14">Hide if visited in the last 14 days</option>
+                <option value="30">Hide if visited in the last 30 days</option>
+                <option value="60">Hide if visited in the last 60 days</option>
+                <option value="90">Hide if visited in the last 90 days</option>
+              </select>
             </label>
-            <button
-              type="button"
-              onClick={bulkGeocodeMissing}
-              style={btnGhost()}
-              disabled={!!busy || !!busySaleId}
-            >
-              Put all on map
-            </button>
           </div>
 
           <h2 style={{ fontSize: '1rem', margin: '20px 0 10px' }}>
             Your sales ({displayedSales.length}
-            {settings.showPriorityOnly && sales.length !== displayedSales.length
-              ? ` of ${sales.length}`
-              : ''}
-            )
+            {sales.length > 0 && displayedSales.length !== sales.length ? ` of ${sales.length}` : ''})
           </h2>
           <p style={{ fontSize: 13, color: '#64748b', margin: '-4px 0 12px', lineHeight: 1.45 }}>
-            Tap a row to open details, map links, and hours.
+            Tap a row to open details, mark visited, map links, and hours.
           </p>
           {sales.length === 0 ? (
             <p style={{ color: '#64748b', fontSize: 14 }}>No sales yet. Add some photos to get started.</p>
           ) : displayedSales.length === 0 ? (
             <p style={{ color: '#64748b', fontSize: 14 }}>
-              Nothing matches your keywords. Turn off “Only sales that match my keywords” or add different words.
+              Nothing matches your filters. Try turning off keyword-only or “visited” hiding, or add different sales.
             </p>
           ) : (
             displayedSales.map((s, idx) => {
@@ -1002,6 +1039,9 @@ export default function App() {
                 matchSummaryLine(s.priorityScore, s.interestMatches),
                 s.interestMatches?.length ? s.interestMatches.map((m) => m.keyword).join(', ') : null,
                 metaBits.length ? metaBits.join(' · ') : null,
+                s.visitedAt != null && !Number.isNaN(s.visitedAt)
+                  ? `Visited ${shortVisitLabel(s.visitedAt)}`
+                  : null,
               ]
                 .filter(Boolean)
                 .join(' · ')
@@ -1182,6 +1222,40 @@ export default function App() {
                         </a>
                       </div>
                     ) : null}
+                    <div
+                      style={{
+                        marginTop: 12,
+                        paddingTop: 12,
+                        borderTop: '1px solid #334155',
+                      }}
+                    >
+                      {s.visitedAt != null && !Number.isNaN(s.visitedAt) ? (
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+                          <span style={{ fontSize: 14, color: '#86efac', fontWeight: 600 }}>
+                            Visited {new Date(s.visitedAt).toLocaleDateString(undefined, {
+                              month: 'short',
+                              day: 'numeric',
+                              year: 'numeric',
+                            })}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => updateSaleField(s.id, { visitedAt: null })}
+                            style={btnGhost()}
+                          >
+                            Forget visit
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => updateSaleField(s.id, { visitedAt: Date.now() })}
+                          style={btn()}
+                        >
+                          Mark as visited
+                        </button>
+                      )}
+                    </div>
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 12 }}>
                       <label style={labelSmall()}>
                         Opens

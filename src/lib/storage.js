@@ -6,6 +6,13 @@ export function normalizeListSortMode(v) {
   return LIST_SORT_MODES.has(v) ? v : 'newest'
 }
 
+const HIDE_VISITED_DAYS = new Set([0, 7, 14, 30, 60, 90])
+
+export function normalizeHideVisitedDays(v) {
+  const n = Number(v)
+  return HIDE_VISITED_DAYS.has(n) ? n : 0
+}
+
 function loadRaw() {
   try {
     const raw = localStorage.getItem(KEY)
@@ -29,6 +36,7 @@ export function loadState() {
         searchRadiusMiles: 50,
         showPriorityOnly: false,
         listSortMode: 'newest',
+        hideVisitedWithinDays: 0,
       },
     }
   }
@@ -42,6 +50,7 @@ export function loadState() {
       searchRadiusMiles: Number(raw.settings?.searchRadiusMiles) || 50,
       showPriorityOnly: Boolean(raw.settings?.showPriorityOnly),
       listSortMode: normalizeListSortMode(raw.settings?.listSortMode),
+      hideVisitedWithinDays: normalizeHideVisitedDays(raw.settings?.hideVisitedWithinDays),
     },
   }
 }
@@ -65,6 +74,7 @@ export function writeFullState(state) {
       searchRadiusMiles: Number(state.settings?.searchRadiusMiles) || 50,
       showPriorityOnly: Boolean(state.settings?.showPriorityOnly),
       listSortMode: normalizeListSortMode(state.settings?.listSortMode),
+      hideVisitedWithinDays: normalizeHideVisitedDays(state.settings?.hideVisitedWithinDays),
     },
   }
   localStorage.setItem(KEY, JSON.stringify(normalized))
