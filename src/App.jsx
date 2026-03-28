@@ -83,13 +83,8 @@ async function processScreenshotFile(file, interestRows, createdAtOffset = 0) {
   }
 }
 
-function sortSalesByPriorityThenRecency(sales) {
-  return [...sales].sort((a, b) => {
-    const pa = Number(a.priorityScore) || 0
-    const pb = Number(b.priorityScore) || 0
-    if (pb !== pa) return pb - pa
-    return (b.createdAt || 0) - (a.createdAt || 0)
-  })
+function sortSalesByNewestFirst(sales) {
+  return [...sales].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
 }
 
 function kmToMiles(km) {
@@ -229,13 +224,8 @@ export default function App() {
         return
       }
 
-      let combined
-      if (picked.length > 1) {
-        const sortedNew = sortSalesByPriorityThenRecency(newSales)
-        combined = [...sortedNew, ...loadState().sales]
-      } else {
-        combined = [...loadState().sales, ...newSales]
-      }
+      const orderedNew = sortSalesByNewestFirst(newSales)
+      const combined = [...orderedNew, ...loadState().sales]
       persist({ sales: combined })
       setRouteResult(null)
       if (failures.length) {
@@ -351,10 +341,12 @@ export default function App() {
     setRouteResult(null)
   }
 
+  const salesOrderedByNewest = useMemo(() => sortSalesByNewestFirst(sales), [sales])
+
   const displayedSales = useMemo(() => {
-    if (!settings.showPriorityOnly) return sales
-    return sales.filter((s) => (Number(s.priorityScore) || 0) > 0)
-  }, [sales, settings.showPriorityOnly])
+    if (!settings.showPriorityOnly) return salesOrderedByNewest
+    return salesOrderedByNewest.filter((s) => (Number(s.priorityScore) || 0) > 0)
+  }, [salesOrderedByNewest, settings.showPriorityOnly])
 
   const runPlan = () => {
     setError(null)
@@ -547,7 +539,7 @@ export default function App() {
             <input type="file" accept="image/*" multiple onChange={onUpload} style={{ display: 'none' }} />
           </label>
           <p style={{ fontSize: 13, color: '#94a3b8', margin: '8px 0 0', lineHeight: 1.45 }}>
-            You can select several photos at once. New sales appear at the top, with your best keyword matches first.
+            You can select several photos at once. The newest sales always appear at the top of your list.
           </p>
 
           <h2 style={{ fontSize: '1rem', margin: '24px 0 10px' }}>What you’re looking for</h2>
