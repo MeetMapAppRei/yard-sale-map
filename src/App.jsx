@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import SaleMap from './components/SaleMap.jsx'
 import SaleThumb from './components/SaleThumb.jsx'
 import { loadState, saveState, writeFullState, upsertSale, removeSale, defaultInterests } from './lib/storage.js'
@@ -122,9 +122,7 @@ export default function App() {
   const [error, setError] = useState(null)
   /** Which sale cards have open `<details>` (key present and true). */
   const [saleCardOpen, setSaleCardOpen] = useState({})
-  const [mapJustAddedId, setMapJustAddedId] = useState(null)
   const [geocodingSaleId, setGeocodingSaleId] = useState(null)
-  const mapFlashTimeoutRef = useRef(null)
 
   useEffect(() => {
     const s = loadState()
@@ -144,12 +142,6 @@ export default function App() {
       document.body.style.overflow = prev
     }
   }, [globalPhotoBusy])
-
-  useEffect(() => {
-    return () => {
-      if (mapFlashTimeoutRef.current) clearTimeout(mapFlashTimeoutRef.current)
-    }
-  }, [])
 
   const persist = useCallback(
     (patch) => {
@@ -285,12 +277,6 @@ export default function App() {
         displayName: g.displayName,
       })
       setSaleCardOpen((prev) => ({ ...prev, [id]: false }))
-      if (mapFlashTimeoutRef.current) clearTimeout(mapFlashTimeoutRef.current)
-      setMapJustAddedId(id)
-      mapFlashTimeoutRef.current = setTimeout(() => {
-        setMapJustAddedId((cur) => (cur === id ? null : cur))
-        mapFlashTimeoutRef.current = null
-      }, 3200)
     } catch (e) {
       setError(e.message || String(e))
     } finally {
@@ -897,7 +883,7 @@ export default function App() {
                       >
                         {metaLine}
                       </div>
-                      {mapJustAddedId === s.id ? (
+                      {s.lat != null && s.lon != null ? (
                         <div
                           style={{
                             fontSize: 13,
@@ -953,7 +939,6 @@ export default function App() {
                               delete next[s.id]
                               return next
                             })
-                            setMapJustAddedId((cur) => (cur === s.id ? null : cur))
                           })()
                         }}
                         style={{ ...btnGhost(), flexShrink: 0 }}
