@@ -543,7 +543,8 @@ export default function App() {
   const displayedSales = useMemo(() => {
     let list = salesSortedForList
     if (settings.showPriorityOnly) {
-      list = list.filter((s) => (Number(s.priorityScore) || 0) > 0)
+      // Keep any sale already placed on the map visible, even if it has no keyword match.
+      list = list.filter((s) => (Number(s.priorityScore) || 0) > 0 || (s.lat != null && s.lon != null))
     }
     const hideDays = Number(settings.hideVisitedWithinDays) || 0
     if (hideDays > 0) {
