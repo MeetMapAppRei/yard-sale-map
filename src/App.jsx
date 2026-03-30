@@ -228,7 +228,7 @@ export default function App() {
       undoSaleRef.current = null
       undoBlobRef.current = null
       undoTimerRef.current = null
-    }, 12000)
+    }, 6000)
   }, [clearUndoTimer])
 
   useEffect(() => {
@@ -1042,7 +1042,16 @@ export default function App() {
           ) : null}
         </section>
 
-        <section style={{ padding: 20, overflow: 'auto', background: '#0b1220' }}>
+        <section
+          style={{
+            paddingTop: 20,
+            paddingRight: 20,
+            paddingLeft: 20,
+            paddingBottom: undoDeleteLabel ? 108 : 20,
+            overflow: 'auto',
+            background: '#0b1220',
+          }}
+        >
           <SaleMap
             home={home}
             sales={displayedSales}
