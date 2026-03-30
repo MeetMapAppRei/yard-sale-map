@@ -183,6 +183,13 @@ export default function App() {
   const [home, setHome] = useState(null)
   const [homeInput, setHomeInput] = useState('')
   const [sales, setSales] = useState([])
+  const [manualSale, setManualSale] = useState({
+    title: '',
+    address: '',
+    open: '',
+    close: '',
+    notes: '',
+  })
   const [interests, setInterests] = useState(defaultInterests())
   const [settings, setSettings] = useState({
     avgKmh: 40,
@@ -355,6 +362,53 @@ export default function App() {
     } finally {
       setPhotoImportProgress(null)
     }
+  }
+
+  const onAddManualSale = () => {
+    const title = String(manualSale.title || '').trim()
+    const address = String(manualSale.address || '').trim()
+    const notes = String(manualSale.notes || '').trim()
+    if (!title && !address && !notes) {
+      setError('Type at least a title, address, or notes before adding a manual sale.')
+      return
+    }
+    const openMinutes = parseTimeInputValue(manualSale.open)
+    const closeMinutes = parseTimeInputValue(manualSale.close)
+    if (openMinutes != null && closeMinutes != null && closeMinutes < openMinutes) {
+      setError('Close time should be after open time.')
+      return
+    }
+    const rawText = [title, address, notes].filter(Boolean).join('\n')
+    const state = loadState()
+    const { score, matches } = scoreTextAgainstInterests(rawText, state.interests)
+    const id = newId()
+    const sale = {
+      id,
+      title: title || address || 'Manual sale',
+      rawText,
+      addressQuery: address,
+      lat: null,
+      lon: null,
+      displayName: null,
+      openMinutes,
+      closeMinutes,
+      priorityScore: score,
+      interestMatches: matches,
+      createdAt: Date.now(),
+      hasImage: false,
+      visitedAt: null,
+    }
+    persist({ sales: [...state.sales, sale] })
+    setRouteResult(null)
+    setError(null)
+    setManualSale({
+      title: '',
+      address: '',
+      open: '',
+      close: '',
+      notes: '',
+    })
+    setSaleCardOpen((prev) => ({ ...prev, [id]: true }))
   }
 
   const updateSaleField = (id, patch) => {
@@ -755,6 +809,62 @@ export default function App() {
             style={btnGhost()}
           >
             Add another group
+          </button>
+
+          <h2 style={{ fontSize: '1rem', margin: '24px 0 10px' }}>Add a sale by hand</h2>
+          <p style={{ fontSize: 13, color: '#94a3b8', margin: '0 0 8px', lineHeight: 1.45 }}>
+            No screenshot handy? Add one manually and place it on the map later.
+          </p>
+          <label style={labelSmall()}>
+            Title (optional)
+            <input
+              value={manualSale.title}
+              onChange={(e) => setManualSale((prev) => ({ ...prev, title: e.target.value }))}
+              placeholder="Garage sale, moving sale…"
+              style={inp()}
+            />
+          </label>
+          <label style={{ ...labelSmall(), marginTop: 8 }}>
+            Address (optional, but needed for map pin)
+            <input
+              value={manualSale.address}
+              onChange={(e) => setManualSale((prev) => ({ ...prev, address: e.target.value }))}
+              placeholder="123 Main St, city, state"
+              style={inp()}
+            />
+          </label>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 8 }}>
+            <label style={labelSmall()}>
+              Opens (optional)
+              <input
+                type="time"
+                value={manualSale.open}
+                onChange={(e) => setManualSale((prev) => ({ ...prev, open: e.target.value }))}
+                style={inp()}
+              />
+            </label>
+            <label style={labelSmall()}>
+              Close (optional)
+              <input
+                type="time"
+                value={manualSale.close}
+                onChange={(e) => setManualSale((prev) => ({ ...prev, close: e.target.value }))}
+                style={inp()}
+              />
+            </label>
+          </div>
+          <label style={{ ...labelSmall(), marginTop: 8 }}>
+            Notes / keywords (optional)
+            <textarea
+              value={manualSale.notes}
+              onChange={(e) => setManualSale((prev) => ({ ...prev, notes: e.target.value }))}
+              rows={3}
+              placeholder="Furniture, Lego, tools, etc."
+              style={{ ...inp(), resize: 'vertical' }}
+            />
+          </label>
+          <button type="button" onClick={onAddManualSale} style={{ ...btn(), marginTop: 10 }}>
+            Add manual sale
           </button>
 
           <details className="ysm-details">
@@ -1184,15 +1294,17 @@ export default function App() {
                       >
                         Put on map
                       </button>
-                      <button
-                        type="button"
-                        onClick={() => reparseSale(s.id)}
-                        disabled={busySaleId === s.id}
-                        style={btnGhost()}
-                        title="Read this photo again for better text"
-                      >
-                        {busySaleId === s.id ? 'Reading…' : 'Read photo again'}
-                      </button>
+                      {s.hasImage !== false ? (
+                        <button
+                          type="button"
+                          onClick={() => reparseSale(s.id)}
+                          disabled={busySaleId === s.id}
+                          style={btnGhost()}
+                          title="Read this photo again for better text"
+                        >
+                          {busySaleId === s.id ? 'Reading…' : 'Read photo again'}
+                        </button>
+                      ) : null}
                     </div>
                     {s.lat != null && s.lon != null ? (
                       <div
