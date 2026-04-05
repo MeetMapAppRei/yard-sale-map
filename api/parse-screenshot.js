@@ -3,6 +3,8 @@
  * Set ANTHROPIC_API_KEY in Vercel (or .env.local for `vercel dev`).
  */
 
+import { checkRateLimit, parseLimitEnv } from './lib/rateLimit.js'
+
 function jsonResponse(res, status, body) {
   res.setHeader('Content-Type', 'application/json; charset=utf-8')
   res.status(status).send(JSON.stringify(body))
@@ -25,6 +27,16 @@ export default async function handler(req, res) {
   }
   if (req.method !== 'POST') {
     return jsonResponse(res, 405, { error: 'Method not allowed' })
+  }
+
+  const parseMax = parseLimitEnv('RATE_LIMIT_PARSE_MAX', 20)
+  const parseWindow = parseLimitEnv('RATE_LIMIT_PARSE_WINDOW_MS', 60_000)
+  const limited = checkRateLimit(req, { prefix: 'parse', max: parseMax, windowMs: parseWindow })
+  if (!limited.ok) {
+    res.setHeader('Retry-After', String(limited.retryAfterSec))
+    return jsonResponse(res, 429, {
+      error: 'Too many smart-reader requests. Try again shortly or rely on on-device text scan.',
+    })
   }
 
   const key = process.env.ANTHROPIC_API_KEY

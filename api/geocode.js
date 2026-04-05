@@ -3,6 +3,8 @@
  * https://operations.osmfoundation.org/policies/nominatim/
  */
 
+import { checkRateLimit, parseLimitEnv } from './lib/rateLimit.js'
+
 function json(res, status, body) {
   res.setHeader('Content-Type', 'application/json; charset=utf-8')
   res.status(status).send(JSON.stringify(body))
@@ -16,6 +18,14 @@ export default async function handler(req, res) {
   }
   if (req.method !== 'POST') {
     return json(res, 405, { error: 'Method not allowed' })
+  }
+
+  const geoMax = parseLimitEnv('RATE_LIMIT_GEOCODE_MAX', 60)
+  const geoWindow = parseLimitEnv('RATE_LIMIT_GEOCODE_WINDOW_MS', 60_000)
+  const limited = checkRateLimit(req, { prefix: 'geocode', max: geoMax, windowMs: geoWindow })
+  if (!limited.ok) {
+    res.setHeader('Retry-After', String(limited.retryAfterSec))
+    return json(res, 429, { error: 'Too many geocode requests. Try again in a moment.' })
   }
 
   let body = req.body
