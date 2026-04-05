@@ -1,12 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import SaleMap from './components/SaleMap.jsx'
 import SaleThumb from './components/SaleThumb.jsx'
-import { loadState, saveState, writeFullState, upsertSale, removeSale, defaultInterests } from './lib/storage.js'
+import {
+  loadState,
+  saveState,
+  writeFullState,
+  upsertSale,
+  removeSale,
+  defaultInterests,
+  normalizeRouteStrategy,
+  normalizeColorScheme,
+} from './lib/storage.js'
 import { scoreTextAgainstInterests } from './lib/interests.js'
 import { geocodeAddress } from './lib/geocode.js'
 import { runOcrOnFile } from './lib/ocr.js'
 import { minutesToLabel } from './lib/parseTimes.js'
-import { planRoute } from './lib/routePlanner.js'
+import { planRoute, computeRouteSequence, summarizeRouteDrivingStats } from './lib/routePlanner.js'
 import { haversineKm, milesToKm } from './lib/haversine.js'
 import { putSaleImage, deleteSaleImage, getSaleImageBlob } from './lib/imageStore.js'
 import { downloadJsonBackup, importBackupJson } from './lib/backup.js'
@@ -15,10 +24,18 @@ import { mergeOcrAndAi } from './lib/mergeAiParse.js'
 import { compressImageFile } from './lib/compressImage.js'
 import { buildGoogleMapsDirectionsUrl } from './lib/googleMapsRoute.js'
 import {
+  dedupeOccurrencesByDate,
+  extractSaleSchedule,
+  getSaleDayIso,
+  migrateSaleDates,
+  scheduleRowsFromAiOccurrences,
+} from './lib/parseSaleSchedule.js'
+import {
   buildGoogleMapsPlaceUrl,
   buildAppleMapsPlaceUrl,
   buildAppleMapsDirectionsUrl,
 } from './lib/mapsLinks.js'
+import { fetchTripDayWeather } from './lib/weatherTrip.js'
 
 function timeInputValue(minutes) {
   if (minutes == null || Number.isNaN(minutes)) return ''
@@ -38,50 +55,126 @@ function newId() {
   return crypto.randomUUID()
 }
 
+const AI_PARSE_TIMEOUT_MS = 50_000
+
+/** Map Tesseract worker messages to short UI hints (mobile first load downloads WASM + language data). */
+function ocrLoggerToImportPatch(m) {
+  const st = String(m?.status || '')
+  const prog = typeof m?.progress === 'number' ? m.progress : 0
+  if (st === 'recognizing text') {
+    const pct = Math.round(prog * 100)
+    return {
+      phase: 'ocr',
+      ocrPct: pct,
+      detail: pct > 0 ? `Scanning text… ${pct}%` : 'Scanning text…',
+    }
+  }
+  if (/loading tesseract|loading language|loading core|downloading/i.test(st)) {
+    return {
+      phase: 'ocr',
+      ocrPct: 0,
+      detail: 'Loading on-device scanner (first photo may take 1–2 min on slow Wi‑Fi)…',
+    }
+  }
+  if (st === 'initializing api' || st === 'initializing tesseract') {
+    return { phase: 'ocr', ocrPct: 0, detail: 'Starting text scanner…' }
+  }
+  return null
+}
+
 /**
  * Full pipeline for one image: compress → store → OCR → optional AI → interest scoring.
  * @param {number} createdAtOffset  ms bump so batch items keep a stable order tie-break
+ * @param {(patch: { phase?: string; ocrPct?: number; detail?: string }) => void} [reportImport]  live progress for the import overlay
  */
-async function processScreenshotFile(file, interestRows, createdAtOffset = 0) {
-  const saleId = newId()
+async function processScreenshotFile(file, interestRows, createdAtOffset = 0, reportImport) {
+  reportImport?.({ phase: 'prepare', ocrPct: 0, detail: 'Shrinking photo for storage…' })
   let toStore
   try {
     toStore = await compressImageFile(file)
   } catch {
     toStore = file
   }
-  await putSaleImage(saleId, toStore)
+  const imageForOcr = toStore instanceof Blob ? toStore : file
+  const mimeForApi = (toStore && toStore.type) || file.type || 'image/jpeg'
+
+  const online = typeof navigator === 'undefined' || navigator.onLine
+  const ac = new AbortController()
+  const tid = setTimeout(() => ac.abort(), AI_PARSE_TIMEOUT_MS)
   let rawText
-  try {
-    rawText = await runOcrOnFile(file, () => {})
-  } catch (e) {
-    await deleteSaleImage(saleId)
-    throw e
-  }
   let ai = null
   try {
-    ai = await parseScreenshotWithAi(await fileToBase64(file), file.type)
-  } catch {
-    /* /api optional */
+    reportImport?.({ phase: 'ocr', ocrPct: 0, detail: 'Reading text from photo…' })
+    const b64 = await fileToBase64(toStore)
+    const [ocrResult, aiResult] = await Promise.all([
+      runOcrOnFile(imageForOcr, (m) => {
+        const patch = ocrLoggerToImportPatch(m)
+        if (patch) reportImport?.(patch)
+      }),
+      online
+        ? parseScreenshotWithAi(b64, mimeForApi, { signal: ac.signal }).catch(() => null)
+        : Promise.resolve(null),
+    ])
+    rawText = ocrResult
+    ai = aiResult
+    if (online && ai == null) {
+      reportImport?.({ phase: 'ai', ocrPct: 100, detail: 'Smart reader unavailable — using photo text only.' })
+    }
+  } catch (e) {
+    throw e
+  } finally {
+    clearTimeout(tid)
   }
+
   const merged = mergeOcrAndAi(ai, rawText)
-  const { score, matches } = scoreTextAgainstInterests(merged.rawText, interestRows)
-  return {
-    id: saleId,
-    title: merged.title,
-    rawText: merged.rawText,
-    addressQuery: merged.addressQuery,
-    lat: null,
-    lon: null,
-    displayName: null,
-    openMinutes: merged.openMinutes,
-    closeMinutes: merged.closeMinutes,
-    priorityScore: score,
-    interestMatches: matches,
-    createdAt: Date.now() + createdAtOffset,
-    hasImage: true,
-    visitedAt: null,
+
+  // Union vision occurrences + every text source (colored flyer lines often missing from OCR).
+  const schedule = dedupeOccurrencesByDate([
+    ...scheduleRowsFromAiOccurrences(ai),
+    ...(Array.isArray(merged.schedule) ? merged.schedule : []),
+    ...extractSaleSchedule(merged.rawText),
+    ...extractSaleSchedule(rawText),
+    ...extractSaleSchedule(String(ai?.summary_text || '')),
+  ])
+  const dated = schedule.filter((x) => x?.isoDate)
+  const occurrences = dated.length
+    ? dated
+    : [{ isoDate: null, openMinutes: merged.openMinutes, closeMinutes: merged.closeMinutes }]
+
+  reportImport?.({ phase: 'prepare', ocrPct: 100, detail: occurrences.length > 1 ? `Found ${occurrences.length} days… saving copies…` : 'Saving photo…' })
+
+  const createdAtBase = Date.now() + createdAtOffset
+  const sales = []
+  for (let j = 0; j < occurrences.length; j++) {
+    const occ = occurrences[j]
+    const saleId = newId()
+    await putSaleImage(saleId, toStore)
+    const { score, matches } = scoreTextAgainstInterests(merged.rawText, interestRows)
+    sales.push({
+      id: saleId,
+      title: merged.title,
+      rawText: merged.rawText,
+      addressQuery: merged.addressQuery,
+      saleDate: occ.isoDate || null,
+      lat: null,
+      lon: null,
+      displayName: null,
+      openMinutes: occ.openMinutes ?? merged.openMinutes,
+      closeMinutes: occ.closeMinutes ?? merged.closeMinutes,
+      priorityScore: score,
+      interestMatches: matches,
+      createdAt: createdAtBase + j,
+      hasImage: true,
+      visitedAt: null,
+      needsReview: computeSaleNeedsReview({
+        saleDate: occ.isoDate || null,
+        rawText: merged.rawText,
+        addressQuery: merged.addressQuery,
+        title: merged.title,
+      }),
+    })
   }
+  return sales
 }
 
 function sortSalesForList(sales, mode, home) {
@@ -137,6 +230,86 @@ function sortSalesForList(sales, mode, home) {
   return list
 }
 
+function normalizeIsoDate(v) {
+  const s = String(v || '').trim()
+  if (!s) return null
+  // HTML date input uses YYYY-MM-DD.
+  const iso = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/)
+  if (iso) {
+    const yyyy = iso[1]
+    const mm = String(Math.min(12, Math.max(1, Number(iso[2])))).padStart(2, '0')
+    const dd = String(Math.min(31, Math.max(1, Number(iso[3])))).padStart(2, '0')
+    return `${yyyy}-${mm}-${dd}`
+  }
+
+  // Some environments yield MM/DD/YYYY or MM-DD-YYYY (date input fallback).
+  const us = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/)
+  if (us) {
+    const mm = String(Math.min(12, Math.max(1, Number(us[1])))).padStart(2, '0')
+    const dd = String(Math.min(31, Math.max(1, Number(us[2])))).padStart(2, '0')
+    const yyyy = String(Number(us[3]))
+    if (/^\d{4}$/.test(yyyy)) return `${yyyy}-${mm}-${dd}`
+  }
+
+  // Occasionally: YYYY/MM/DD
+  const ymd = s.match(/^(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})$/)
+  if (ymd) {
+    const yyyy = String(Number(ymd[1]))
+    const mm = String(Math.min(12, Math.max(1, Number(ymd[2])))).padStart(2, '0')
+    const dd = String(Math.min(31, Math.max(1, Number(ymd[3])))).padStart(2, '0')
+    if (/^\d{4}$/.test(yyyy)) return `${yyyy}-${mm}-${dd}`
+  }
+
+  return null
+}
+
+function dateSortKey(iso) {
+  // Null/unknown sorts last.
+  if (!iso) return '9999-12-31'
+  return iso
+}
+
+function formatIsoDateLabel(iso) {
+  if (!iso) return 'No day set'
+  const clean = normalizeIsoDate(iso)
+  if (!clean) return 'No day set'
+  // Force a stable day label across timezones.
+  const dt = new Date(`${clean}T12:00:00Z`)
+  return dt.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' })
+}
+
+function todayIsoLocal() {
+  const d = new Date()
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${y}-${m}-${day}`
+}
+
+function tripDayIsoFromSettings(settings) {
+  const mode = settings?.tripDayMode || 'today'
+  if (mode === 'today') return todayIsoLocal()
+  return normalizeIsoDate(settings?.tripDayIso)
+}
+
+function saleTripEligibility(sale, tripIso) {
+  const saleIso = getSaleDayIso(sale)
+  if (!tripIso) return { ok: false, reason: 'Pick a trip day first.' }
+  if (!saleIso) {
+    return {
+      ok: false,
+      reason: `No sale day found — set “Day” below or add the When line to the text. (Trip is ${formatIsoDateLabel(tripIso)}.)`,
+    }
+  }
+  if (saleIso !== tripIso) {
+    return {
+      ok: false,
+      reason: `This sale is for ${formatIsoDateLabel(saleIso)}. Trip day is ${formatIsoDateLabel(tripIso)}.`,
+    }
+  }
+  return { ok: true, reason: '' }
+}
+
 function kmToMiles(km) {
   return km * 0.621371
 }
@@ -148,9 +321,26 @@ function matchSummaryLine(score, _matches) {
   return 'No keyword matches yet'
 }
 
+/** Strip noisy OCR phrasing so list titles read like addresses. */
+function displaySaleTitle(title) {
+  let t = String(title || '').trim()
+  t = t.replace(/^the address for this sale is\s*:?\s*/i, '')
+  t = t.replace(/^address\s*:\s*/i, '')
+  t = t.replace(/^location\s*:\s*/i, '')
+  t = t.replace(/^sale\s+(at|location)\s*:?\s*/i, '')
+  return t.trim() || 'Untitled sale'
+}
+
 function shortVisitLabel(ts) {
   if (ts == null || Number.isNaN(ts)) return ''
   return new Date(ts).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+}
+
+/** Clicks on text inside summary may target a Text node (no .closest) — avoid throwing on mobile. */
+function eventTargetIsInsideButton(target) {
+  if (target == null || typeof target !== 'object') return false
+  const el = target.nodeType === 1 ? target : target.parentElement
+  return !!(el && typeof el.closest === 'function' && el.closest('button'))
 }
 
 function saleVisitedWithinDays(s, days) {
@@ -179,9 +369,68 @@ function geocodeUserMessage(raw, addressLine) {
   return base
 }
 
+function looksLikeAddress(s) {
+  const t = String(s || '').trim()
+  if (!t) return false
+  if (!/\d/.test(t)) return false
+  if (t.length < 6) return false
+  // Common street tokens; keep conservative to avoid geocoding random OCR junk.
+  return /\b(st|street|rd|road|ave|avenue|blvd|boulevard|dr|drive|ln|lane|ct|court|cir|circle|hwy|highway|pkwy|parkway|way|pl|place|trl|trail)\b/i.test(
+    t,
+  ) || /,/.test(t)
+}
+
+function bestGeocodeQueryForSale(sale) {
+  const direct = String(sale?.addressQuery || '').trim()
+  if (direct) return direct
+
+  const title = displaySaleTitle(sale?.title)
+  if (looksLikeAddress(title)) return title
+
+  const raw = String(sale?.rawText || '')
+  const firstLine = raw
+    .split(/\r?\n/)
+    .map((x) => x.trim())
+    .filter(Boolean)[0]
+  if (looksLikeAddress(firstLine)) return firstLine
+
+  return ''
+}
+
+/** True when sale day or a geocodable address line is missing—prompts review. */
+function computeSaleNeedsReview(sale) {
+  if (!sale) return false
+  if (!getSaleDayIso(sale)) return true
+  if (!String(bestGeocodeQueryForSale(sale) || '').trim()) return true
+  return false
+}
+
+function buildTripShareLines(activeTripIso, routeResult, tripEligibleSales) {
+  if (!activeTripIso) return { error: 'Pick a trip day first.' }
+  const stops = routeResult?.ordered?.length ? routeResult.ordered : tripEligibleSales
+  if (!stops.length) return { error: 'No sales for this trip day — add sales or plan a route first.' }
+  const dayLabel = formatIsoDateLabel(activeTripIso)
+  const lines = [`Yard sale route — ${dayLabel}`, '']
+  stops.forEach((s, i) => {
+    const addr = String(s.addressQuery || bestGeocodeQueryForSale(s) || displaySaleTitle(s.title) || '').trim()
+    const open = s.openMinutes != null ? minutesToLabel(s.openMinutes) : '—'
+    const close = s.closeMinutes != null ? minutesToLabel(s.closeMinutes) : ''
+    const timeLine = close ? `${open} – ${close}` : `Opens ${open}`
+    lines.push(`${i + 1}. ${displaySaleTitle(s.title)}`)
+    lines.push(`   ${addr}`)
+    lines.push(`   ${timeLine}`)
+    if (s.lat != null && s.lon != null) {
+      lines.push(`   ${buildGoogleMapsPlaceUrl(s.lat, s.lon, s.title)}`)
+    }
+    lines.push('')
+  })
+  return { text: lines.join('\n').trim(), dayLabel }
+}
+
 export default function App() {
   const [home, setHome] = useState(null)
   const [homeInput, setHomeInput] = useState('')
+  const [autoCenter, setAutoCenter] = useState(null)
   const [sales, setSales] = useState([])
   const [interests, setInterests] = useState(defaultInterests())
   const [settings, setSettings] = useState({
@@ -191,6 +440,11 @@ export default function App() {
     showPriorityOnly: false,
     listSortMode: 'newest',
     hideVisitedWithinDays: 0,
+    tripDayMode: 'today',
+    tripDayIso: null,
+    routeStrategy: 'keywords',
+    colorScheme: 'dark',
+    gettingStartedDismissed: false,
   })
   const [startTime, setStartTime] = useState('08:00')
   const [routeResult, setRouteResult] = useState(null)
@@ -198,14 +452,28 @@ export default function App() {
   const [busySaleId, setBusySaleId] = useState(null)
   const [photoImportProgress, setPhotoImportProgress] = useState(null)
   const [error, setError] = useState(null)
-  /** Which sale cards have open `<details>` (key present and true). */
+  /** Which sale cards are expanded (key present and true). */
   const [saleCardOpen, setSaleCardOpen] = useState({})
+  /** After a card is opened once, keep its body mounted and use `hidden` when collapsed (avoids mobile blank-screen on unmount). */
+  const [saleCardBodyMounted, setSaleCardBodyMounted] = useState({})
   const [geocodingSaleId, setGeocodingSaleId] = useState(null)
+  /** Bulk “Put all eligible sales on map”: loading + done feedback near the button (global `busy` is easy to miss below the fold). */
+  const [bulkGeocodeStatus, setBulkGeocodeStatus] = useState(null)
+  /** Full-screen checklist: addresses + times only (local data; no map tiles required). */
+  const [groundMode, setGroundMode] = useState(false)
+  const [tripWeather, setTripWeather] = useState(null)
+  const [weatherLoading, setWeatherLoading] = useState(false)
+  const [shareToast, setShareToast] = useState(null)
   const [offline, setOffline] = useState(() => (typeof navigator !== 'undefined' ? !navigator.onLine : false))
   const [undoDeleteLabel, setUndoDeleteLabel] = useState(null)
   const undoSaleRef = useRef(null)
   const undoBlobRef = useRef(null)
   const undoTimerRef = useRef(null)
+  /** Latest list row for merges — async geocode must not upsert from stale loadState() or keyword rows disappear after “Put on map”. */
+  const salesRef = useRef(sales)
+  salesRef.current = sales
+
+  const needsReviewCount = useMemo(() => sales.filter((s) => s.needsReview).length, [sales])
 
   const clearUndoTimer = useCallback(() => {
     if (undoTimerRef.current) {
@@ -225,12 +493,43 @@ export default function App() {
   }, [clearUndoTimer])
 
   useEffect(() => {
+    const t = normalizeColorScheme(settings.colorScheme)
+    document.documentElement.setAttribute('data-ysm-theme', t)
+    const meta = document.querySelector('meta[name="theme-color"]')
+    if (meta) meta.setAttribute('content', t === 'light' ? '#f1f5f9' : '#0c1322')
+  }, [settings.colorScheme])
+
+  useEffect(() => {
     const s = loadState()
+    const sales = migrateSaleDates(s.sales)
     setHome(s.home)
-    setSales(s.sales)
+    setSales(sales)
     setInterests(s.interests)
     setSettings(s.settings)
+    if (JSON.stringify(sales) !== JSON.stringify(s.sales)) {
+      saveState({ sales })
+    }
   }, [])
+
+  // Auto-center the map over the user's current location (without changing the trip starting point).
+  useEffect(() => {
+    if (home) return
+    if (!navigator.geolocation) return
+    let cancelled = false
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        if (cancelled) return
+        setAutoCenter({ lat: pos.coords.latitude, lon: pos.coords.longitude })
+      },
+      () => {
+        /* ignore (permission denied / unavailable) */
+      },
+      { enableHighAccuracy: false, timeout: 8000, maximumAge: 5 * 60 * 1000 },
+    )
+    return () => {
+      cancelled = true
+    }
+  }, [home])
 
   const globalPhotoBusy = photoImportProgress != null || busySaleId != null
 
@@ -242,6 +541,30 @@ export default function App() {
       document.body.style.overflow = prev
     }
   }, [globalPhotoBusy])
+
+  useEffect(() => {
+    if (!bulkGeocodeStatus || bulkGeocodeStatus.phase !== 'done') return
+    const t = window.setTimeout(() => setBulkGeocodeStatus(null), 12000)
+    return () => clearTimeout(t)
+  }, [bulkGeocodeStatus])
+
+  useEffect(() => {
+    if (!groundMode) return
+    const onKey = (e) => {
+      if (e.key === 'Escape') setGroundMode(false)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [groundMode])
+
+  useEffect(() => {
+    if (!groundMode) return
+    const prev = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      document.body.style.overflow = prev
+    }
+  }, [groundMode])
 
   useEffect(() => {
     const on = () => setOffline(false)
@@ -268,6 +591,15 @@ export default function App() {
     },
     [],
   )
+
+  const scrollToFirstNeedsReview = useCallback(() => {
+    const first = sales.find((s) => s.needsReview)
+    if (!first) return
+    const el = document.getElementById(`ysm-sale-${first.id}`)
+    el?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    setSaleCardBodyMounted((m) => ({ ...m, [first.id]: true }))
+    setSaleCardOpen((prev) => ({ ...prev, [first.id]: true }))
+  }, [sales])
 
   const onGeocodeHome = async () => {
     setError(null)
@@ -326,10 +658,18 @@ export default function App() {
     try {
       for (let i = 0; i < picked.length; i++) {
         const file = picked[i]
-        setPhotoImportProgress({ current: i + 1, total: picked.length })
+        setPhotoImportProgress({
+          current: i + 1,
+          total: picked.length,
+          phase: 'prepare',
+          ocrPct: 0,
+          detail: 'Shrinking photo for storage…',
+        })
         try {
-          const sale = await processScreenshotFile(file, interestRows, i)
-          newSales.push(sale)
+          const salesFromPhoto = await processScreenshotFile(file, interestRows, i, (patch) => {
+            setPhotoImportProgress((prev) => (prev ? { ...prev, ...patch } : prev))
+          })
+          newSales.push(...salesFromPhoto)
         } catch (err) {
           failures.push(`${file.name || 'image'}: ${err.message || String(err)}`)
         }
@@ -359,7 +699,8 @@ export default function App() {
 
   const updateSaleField = (id, patch) => {
     const state = loadState()
-    const s = state.sales.find((x) => x.id === id)
+    const live = salesRef.current
+    const s = live.find((x) => x.id === id) ?? state.sales.find((x) => x.id === id)
     if (!s) return
     let next = { ...s, ...patch }
     if (patch.rawText !== undefined || patch.interestsRefresh) {
@@ -367,8 +708,27 @@ export default function App() {
       next.priorityScore = score
       next.interestMatches = matches
       delete next.interestsRefresh
+      if (patch.rawText !== undefined && !normalizeIsoDate(next.saleDate)) {
+        const inf = extractSaleSchedule(next.rawText || '')
+        if (inf.length === 1) {
+          next.saleDate = inf[0].isoDate
+          if (next.openMinutes == null && inf[0].openMinutes != null) next.openMinutes = inf[0].openMinutes
+          if (next.closeMinutes == null && inf[0].closeMinutes != null) next.closeMinutes = inf[0].closeMinutes
+        }
+      }
+    } else {
+      next.priorityScore = s.priorityScore
+      next.interestMatches = s.interestMatches
     }
-    persist({ sales: upsertSale(state.sales, next) })
+    if (patch.needsReview === false) {
+      next.needsReview = false
+    } else if (patch.needsReview === true) {
+      next.needsReview = true
+    } else {
+      next.needsReview = computeSaleNeedsReview(next)
+    }
+    const list = live.length ? live : state.sales
+    persist({ sales: upsertSale(list, next) })
     setRouteResult(null)
   }
 
@@ -385,9 +745,9 @@ export default function App() {
         lon: g.lon,
         displayName: g.displayName,
       })
-      setSaleCardOpen((prev) => ({ ...prev, [id]: false }))
     } catch (e) {
       setError(geocodeUserMessage(e.message, s.addressQuery))
+      updateSaleField(id, { needsReview: true })
     } finally {
       setBusy(null)
       setGeocodingSaleId(null)
@@ -423,19 +783,28 @@ export default function App() {
     setBusySaleId(id)
     let aiError = null
     try {
-      const ocrText = await runOcrOnFile(file, () => {})
-      let ai = null
-      try {
-        ai = await parseScreenshotWithAi(await blobToBase64(blob), blob.type || 'image/jpeg')
-      } catch (e) {
-        aiError = e.message || String(e)
-      }
+      const [ocrText, ai] = await Promise.all([
+        runOcrOnFile(file, () => {}),
+        parseScreenshotWithAi(await blobToBase64(blob), blob.type || 'image/jpeg').catch((e) => {
+          aiError = e.message || String(e)
+          return null
+        }),
+      ])
       let merged = mergeOcrAndAi(ai, ocrText)
       const state = loadState()
       const s = state.sales.find((x) => x.id === id)
       if (!s) return
       if (merged.openMinutes == null && s.openMinutes != null) merged = { ...merged, openMinutes: s.openMinutes }
       if (merged.closeMinutes == null && s.closeMinutes != null) merged = { ...merged, closeMinutes: s.closeMinutes }
+      const schedule = dedupeOccurrencesByDate([
+        ...scheduleRowsFromAiOccurrences(ai),
+        ...(Array.isArray(merged.schedule) ? merged.schedule : []),
+        ...extractSaleSchedule(merged.rawText),
+        ...extractSaleSchedule(ocrText),
+        ...extractSaleSchedule(String(ai?.summary_text || '')),
+      ])
+      const dated = schedule.filter((x) => x?.isoDate)
+      const first = dated[0]
       const prevAddr = (s.addressQuery || '').trim()
       const addrChanged = (merged.addressQuery || '').trim() !== prevAddr
       const { score, matches } = scoreTextAgainstInterests(merged.rawText, state.interests)
@@ -449,6 +818,12 @@ export default function App() {
         priorityScore: score,
         interestMatches: matches,
       }
+      if (first) {
+        next.saleDate = first.isoDate
+        if (first.openMinutes != null) next.openMinutes = first.openMinutes
+        if (first.closeMinutes != null) next.closeMinutes = first.closeMinutes
+      }
+      next.needsReview = computeSaleNeedsReview(next)
       if (addrChanged) {
         next.lat = null
         next.lon = null
@@ -473,11 +848,12 @@ export default function App() {
 
   const onInterestsChange = (rows) => {
     const state = loadState()
+    const normalized = Array.isArray(rows) && rows.length ? rows : defaultInterests()
     const nextSales = state.sales.map((s) => {
-      const { score, matches } = scoreTextAgainstInterests(s.rawText, rows)
+      const { score, matches } = scoreTextAgainstInterests(s.rawText, normalized)
       return { ...s, priorityScore: score, interestMatches: matches }
     })
-    persist({ interests: rows, sales: nextSales })
+    persist({ interests: normalized, sales: nextSales })
     setRouteResult(null)
   }
 
@@ -489,7 +865,11 @@ export default function App() {
   const displayedSales = useMemo(() => {
     let list = salesSortedForList
     if (settings.showPriorityOnly) {
-      list = list.filter((s) => (Number(s.priorityScore) || 0) > 0)
+      list = list.filter((s) => {
+        const score = Number(s.priorityScore) || 0
+        const hasMatches = Array.isArray(s.interestMatches) && s.interestMatches.length > 0
+        return score > 0 || hasMatches
+      })
     }
     const hideDays = Number(settings.hideVisitedWithinDays) || 0
     if (hideDays > 0) {
@@ -498,48 +878,251 @@ export default function App() {
     return list
   }, [salesSortedForList, settings.showPriorityOnly, settings.hideVisitedWithinDays])
 
+  const activeTripIso = useMemo(
+    () => tripDayIsoFromSettings(settings),
+    [settings.tripDayMode, settings.tripDayIso],
+  )
+
+  const tripEligibleSales = useMemo(() => {
+    if (!activeTripIso) return []
+    return displayedSales.filter((s) => saleTripEligibility(s, activeTripIso).ok)
+  }, [displayedSales, activeTripIso])
+
+  const groundStops = useMemo(() => {
+    if (!activeTripIso) return []
+    if (routeResult?.ordered?.length) return routeResult.ordered
+    return tripEligibleSales
+  }, [activeTripIso, routeResult, tripEligibleSales])
+
+  const refreshTripWeather = useCallback(() => {
+    if (!home?.lat || !home?.lon || !activeTripIso) {
+      setTripWeather(null)
+      setWeatherLoading(false)
+      return
+    }
+    setWeatherLoading(true)
+    fetchTripDayWeather({ lat: home.lat, lon: home.lon, isoDate: activeTripIso })
+      .then(setTripWeather)
+      .catch(() => setTripWeather({ level: 'ok', headline: 'Weather check failed — try again later.' }))
+      .finally(() => setWeatherLoading(false))
+  }, [home?.lat, home?.lon, activeTripIso])
+
+  useEffect(() => {
+    if (!home?.lat || !home?.lon || !activeTripIso) {
+      setTripWeather(null)
+      setWeatherLoading(false)
+      return
+    }
+    let cancelled = false
+    setWeatherLoading(true)
+    fetchTripDayWeather({ lat: home.lat, lon: home.lon, isoDate: activeTripIso })
+      .then((w) => {
+        if (!cancelled) setTripWeather(w)
+      })
+      .catch(() => {
+        if (!cancelled) setTripWeather({ level: 'ok', headline: 'Weather check failed — try again later.' })
+      })
+      .finally(() => {
+        if (!cancelled) setWeatherLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [home?.lat, home?.lon, activeTripIso])
+
+  const scrollToSaleId = useCallback((id) => {
+    setGroundMode(false)
+    window.setTimeout(() => {
+      document.getElementById(`ysm-sale-${id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    }, 80)
+  }, [])
+
+  const shareTripList = useCallback(async () => {
+    const built = buildTripShareLines(activeTripIso, routeResult, tripEligibleSales)
+    if (built.error) {
+      setError(built.error)
+      return
+    }
+    const { text, dayLabel } = built
+    try {
+      if (typeof navigator !== 'undefined' && navigator.share) {
+        await navigator.share({ title: `Yard sales ${dayLabel}`, text })
+        setError(null)
+      } else if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text)
+        setError(null)
+        setShareToast('Copied list to clipboard')
+        window.setTimeout(() => setShareToast(null), 2500)
+      } else {
+        setError('Sharing isn’t available in this browser.')
+      }
+    } catch (e) {
+      if (e?.name !== 'AbortError') setError(e?.message || 'Could not share.')
+    }
+  }, [activeTripIso, routeResult, tripEligibleSales])
+
+  const copyTripList = useCallback(async () => {
+    const built = buildTripShareLines(activeTripIso, routeResult, tripEligibleSales)
+    if (built.error) {
+      setError(built.error)
+      return
+    }
+    try {
+      if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(built.text)
+        setError(null)
+        setShareToast('Copied list to clipboard')
+        window.setTimeout(() => setShareToast(null), 2500)
+      } else {
+        setError('Clipboard isn’t available in this browser.')
+      }
+    } catch (e) {
+      setError(e?.message || 'Could not copy.')
+    }
+  }, [activeTripIso, routeResult, tripEligibleSales])
+
+  const tripDriveSummary = useMemo(
+    () => summarizeRouteDrivingStats({ legs: routeResult?.legs, ordered: routeResult?.ordered }),
+    [routeResult],
+  )
+
   const runPlan = () => {
     setError(null)
     const startMinutes = parseTimeInputValue(startTime) ?? 8 * 60
+    if (!activeTripIso) {
+      setError('Pick a trip day (today or a future day) before planning a route.')
+      return
+    }
+    if (!tripEligibleSales.length) {
+      const anyMissingDay = displayedSales.some((s) => !getSaleDayIso(s))
+      setError(
+        anyMissingDay
+          ? `No sales are eligible for ${formatIsoDateLabel(activeTripIso)} yet. Set “Day” on your sales, then try again.`
+          : `No sales are scheduled for ${formatIsoDateLabel(activeTripIso)}.`,
+      )
+      return
+    }
     const result = planRoute({
       home,
       startMinutes,
-      sales: displayedSales,
+      sales: tripEligibleSales,
       settings,
     })
     setRouteResult(result)
   }
 
+  const moveRouteStop = useCallback(
+    (index, delta) => {
+      setRouteResult((prev) => {
+        if (!prev?.ordered?.length || !home) return prev
+        const j = index + delta
+        if (j < 0 || j >= prev.ordered.length) return prev
+        const swapped = [...prev.ordered]
+        const t = swapped[index]
+        swapped[index] = swapped[j]
+        swapped[j] = t
+        const startMinutes = parseTimeInputValue(startTime) ?? 8 * 60
+        const { ordered, legs } = computeRouteSequence({
+          home,
+          startMinutes,
+          orderedSales: swapped,
+          settings,
+        })
+        const lateCount = ordered.filter((s) => s.arrivalAfterClose).length
+        return {
+          ...prev,
+          ordered,
+          legs,
+          userReordered: true,
+          orderExplanation:
+            'This is your custom order (use ↑/↓). Times assume you visit stops in this sequence; drive estimates are the same as before (not live traffic).' +
+            (lateCount > 0
+              ? ` ${lateCount} stop(s) would arrive after closing at this pace—check hours or reorder.`
+              : ''),
+        }
+      })
+    },
+    [home, startTime, settings],
+  )
+
   const bulkGeocodeMissing = async () => {
     const state = loadState()
-    const missing = state.sales.filter(
-      (s) => s.addressQuery?.trim() && (s.lat == null || s.lon == null),
-    )
+    // "Put all eligible sales on map" respects filters (keyword-only, visited hiding, etc.)
+    // and also try reasonable fallbacks when AI didn't produce a dedicated address field.
+    const source = displayedSales
+    const tripIso = activeTripIso
+    const eligible = tripIso ? source.filter((s) => saleTripEligibility(s, tripIso).ok) : []
+    const ineligibleCount = tripIso ? Math.max(0, source.length - eligible.length) : source.length
+
+    const missing = eligible
+      .map((s) => ({ sale: s, query: bestGeocodeQueryForSale(s) }))
+      .filter(({ sale, query }) => query && (sale.lat == null || sale.lon == null))
+    const noAddressQueryIds = eligible
+      .filter((s) => (s.lat == null || s.lon == null) && !bestGeocodeQueryForSale(s))
+      .map((s) => s.id)
     if (!missing.length) {
-      setError(null)
+      setBulkGeocodeStatus(null)
+      if (!tripIso) {
+        setError(
+          'Pick a trip day first (today or future) so we know which sales are eligible to place on the map.',
+        )
+        return
+      }
+      const noPinEligible = eligible.filter((s) => s.lat == null || s.lon == null).length
+      const noQueryEligible = eligible.filter((s) => (s.lat == null || s.lon == null) && !bestGeocodeQueryForSale(s)).length
+      if (noPinEligible > 0 && noQueryEligible > 0) {
+        setError(
+          `No addresses found to place on the map. Open a sale and type an address (add city/state/ZIP), then try again.`,
+        )
+      } else if (ineligibleCount > 0) {
+        setError(`No eligible sales needed pins for ${formatIsoDateLabel(tripIso)}. (${ineligibleCount} sale(s) are on a different day.)`)
+      } else {
+        setError(null)
+      }
       return
     }
     setError(null)
-    setBusy(`Finding ${missing.length} addresses on the map…`)
+    setBulkGeocodeStatus({ phase: 'loading', total: missing.length })
+    setBusy(`Finding ${missing.length} address(es) on the map…`)
     const nextSales = [...state.sales]
     let failed = 0
+    let skipped = 0
+    let skippedWrongDay = 0
+    let placed = 0
+    const failedIds = []
     try {
-      for (const sale of missing) {
+      for (const { sale, query } of missing) {
+        if (!query) {
+          skipped += 1
+          continue
+        }
+        if (tripIso && !saleTripEligibility(sale, tripIso).ok) {
+          skippedWrongDay += 1
+          continue
+        }
         setGeocodingSaleId(sale.id)
         try {
-          const g = await geocodeAddress(sale.addressQuery)
+          const g = await geocodeAddress(query)
           const i = nextSales.findIndex((x) => x.id === sale.id)
           if (i >= 0) {
-            nextSales[i] = {
+            const merged = {
               ...nextSales[i],
+              addressQuery: String(nextSales[i].addressQuery || '').trim() ? nextSales[i].addressQuery : query,
               lat: g.lat,
               lon: g.lon,
               displayName: g.displayName,
             }
+            merged.needsReview = computeSaleNeedsReview(merged)
+            nextSales[i] = merged
+            placed += 1
           }
-          setSaleCardOpen((prev) => ({ ...prev, [sale.id]: false }))
         } catch {
           failed += 1
+          failedIds.push(sale.id)
+          const i = nextSales.findIndex((x) => x.id === sale.id)
+          if (i >= 0) {
+            nextSales[i] = { ...nextSales[i], needsReview: true }
+          }
         }
       }
     } finally {
@@ -548,29 +1131,58 @@ export default function App() {
     persist({ sales: nextSales })
     setRouteResult(null)
     setBusy(null)
-    if (failed) {
+    setBulkGeocodeStatus({
+      phase: 'done',
+      placed,
+      failed,
+      skipped,
+      skippedWrongDay,
+      failedIds,
+      noAddressQueryIds,
+    })
+    if (failed || skipped || skippedWrongDay || ineligibleCount) {
+      const parts = []
+      if (failed) parts.push(`Couldn't place ${failed} sale(s) on the map`)
+      if (skipped) parts.push(`Skipped ${skipped} sale(s) with no readable address`)
+      if (skippedWrongDay) parts.push(`Skipped ${skippedWrongDay} sale(s) not on ${formatIsoDateLabel(tripIso)}`)
+      if (ineligibleCount) parts.push(`${ineligibleCount} sale(s) weren’t eligible for this trip day`)
       setError(
-        `Couldn't place ${failed} sale(s) on the map. Open each sale and add city, state, or ZIP, then try again.`,
+        `${parts.join('. ')}. Open each sale and add city, state, or ZIP, then try again.`,
       )
     }
   }
 
   const withinRadius = useMemo(() => {
-    if (!home) return displayedSales.map(() => true)
+    if (!home) {
+      const all = {}
+      displayedSales.forEach((s) => {
+        all[s.id] = true
+      })
+      return all
+    }
     const rKm = milesToKm(settings.searchRadiusMiles)
-    return displayedSales.map((s) => {
+    const map = {}
+    displayedSales.forEach((s) => {
       if (s.lat == null || s.lon == null) return false
-      return haversineKm(home.lat, home.lon, s.lat, s.lon) <= rKm
+      map[s.id] = haversineKm(home.lat, home.lon, s.lat, s.lon) <= rKm
     })
+    return map
   }, [home, displayedSales, settings.searchRadiusMiles])
 
-  const importPct =
-    photoImportProgress && photoImportProgress.total > 0
-      ? Math.round((photoImportProgress.current / photoImportProgress.total) * 100)
-      : 0
+  const importPct = useMemo(() => {
+    const p = photoImportProgress
+    if (!p?.total) return 0
+    const slice = 100 / p.total
+    const base = (p.current - 1) * slice
+    if (p.phase === 'ai') return Math.min(99, Math.round(base + slice * 0.93))
+    if (p.phase === 'prepare') return Math.round(base + slice * 0.05)
+    const ocr = Number(p.ocrPct) || 0
+    const ocrFrac = (ocr / 100) * slice * 0.88
+    return Math.min(99, Math.round(base + slice * 0.06 + ocrFrac))
+  }, [photoImportProgress])
 
   return (
-    <div style={{ minHeight: '100%', display: 'flex', flexDirection: 'column' }}>
+    <div className="ysm-shell">
       {globalPhotoBusy ? (
         <div
           className="ysm-global-busy"
@@ -587,11 +1199,20 @@ export default function App() {
                 <p className="ysm-global-busy-sub">
                   Photo {photoImportProgress.current} of {photoImportProgress.total}
                 </p>
+                {photoImportProgress.detail ? (
+                  <p className="ysm-global-busy-detail">{photoImportProgress.detail}</p>
+                ) : null}
                 <div className="ysm-global-busy-track">
                   <div className="ysm-global-busy-fill" style={{ width: `${importPct}%` }} />
                 </div>
+                <p className="ysm-global-busy-tip">
+                  When this finishes, open <strong>Trip planner</strong> below: use <strong>Plan a trip today</strong> or{' '}
+                  <strong>Plan a future trip</strong> (then choose the date).
+                </p>
                 <p className="ysm-global-busy-hint">
-                  Pulling out addresses, times, and text. Each one can take a few seconds—especially online.
+                  If a step sits for a bit, the app is working around slow phone photo decoding (especially on Android).
+                  The <strong>first</strong> text scan also downloads the on-device reader—stay on this tab. The optional
+                  smart reader needs internet and times out after about a minute; OCR still runs if it doesn’t finish.
                 </p>
               </>
             ) : (
@@ -604,19 +1225,70 @@ export default function App() {
           </div>
         </div>
       ) : null}
-      <header
-        style={{
-          padding: '16px 20px',
-          borderBottom: '1px solid #334155',
-          background: '#020617',
-        }}
-      >
-        <h1 style={{ margin: 0, fontSize: '1.35rem', fontWeight: 700 }}>Yard Sale Route Planner</h1>
-        <p style={{ margin: '8px 0 0', color: '#94a3b8', fontSize: 15, maxWidth: 640, lineHeight: 1.5 }}>
-          Snap photos of flyers and posts. We pull out addresses and times, drop pins on the map, and help you plan a
-          route. Tell us what you’re hunting for (games, tools, jewelry…) and the best matches rise to the top.
-        </p>
+      <header className="ysm-header">
+        <div className="ysm-header-top">
+          <div className="ysm-header-copy">
+            <h1 className="ysm-header-title">Yard Sale Route Planner</h1>
+            <p className="ysm-header-tagline">
+              We plan a route for what you want to find—free, private, in your browser.
+            </p>
+            <p className="ysm-header-lede">
+              We plan a driving route for what you want to find. Snap photos of flyers and posts—we pull out addresses and
+              times, drop pins on the map, and rank stops using your keywords (games, tools, jewelry…) so the best fits
+              come first.
+            </p>
+          </div>
+          <div className="ysm-theme-toggle" role="group" aria-label="Appearance">
+            <button
+              type="button"
+              className={
+                normalizeColorScheme(settings.colorScheme) === 'dark'
+                  ? 'ysm-theme-toggle-btn ysm-theme-toggle-btn--active'
+                  : 'ysm-theme-toggle-btn'
+              }
+              onClick={() => persist({ settings: { ...settings, colorScheme: 'dark' } })}
+              aria-pressed={normalizeColorScheme(settings.colorScheme) === 'dark'}
+            >
+              Dark
+            </button>
+            <button
+              type="button"
+              className={
+                normalizeColorScheme(settings.colorScheme) === 'light'
+                  ? 'ysm-theme-toggle-btn ysm-theme-toggle-btn--active'
+                  : 'ysm-theme-toggle-btn'
+              }
+              onClick={() => persist({ settings: { ...settings, colorScheme: 'light' } })}
+              aria-pressed={normalizeColorScheme(settings.colorScheme) === 'light'}
+            >
+              Light
+            </button>
+          </div>
+        </div>
       </header>
+
+      <div className="ysm-toolbar-wrap">
+        <div className="ysm-toolbar" role="toolbar" aria-label="Trip tools">
+          <button
+            type="button"
+            className="ysm-toolbar-btn"
+            onClick={() => setGroundMode(true)}
+            aria-describedby="ysm-ground-help"
+          >
+            On-the-ground mode
+          </button>
+          <button type="button" className="ysm-toolbar-btn" onClick={() => shareTripList()}>
+            Share trip
+          </button>
+          <button type="button" className="ysm-toolbar-btn" onClick={() => copyTripList()}>
+            Copy list
+          </button>
+        </div>
+        <p id="ysm-ground-help" className="ysm-toolbar-hint">
+          <strong>On-the-ground mode:</strong> full-screen <strong>addresses and hours</strong> for your trip (or route
+          order). Stays on this device — use when the map’s slow or you only want a simple list.
+        </p>
+      </div>
 
       {offline ? (
         <div className="ysm-offline-banner" role="status">
@@ -626,140 +1298,146 @@ export default function App() {
       ) : null}
 
       <main className="ysm-layout">
-        <section style={{ padding: 20, borderRight: '1px solid #334155', overflow: 'auto' }}>
-          {error ? (
-            <div
-              style={{
-                marginBottom: 12,
-                padding: '10px 12px',
-                background: '#450a0a',
-                border: '1px solid #991b1b',
-                borderRadius: 8,
-                color: '#fecaca',
-                fontSize: 14,
-              }}
-            >
-              {error}
-            </div>
-          ) : null}
-          {busy ? (
-            <div style={{ marginBottom: 12, color: '#93c5fd', fontSize: 14 }}>
-              {busy}
+        <section className="ysm-main-inner" style={{ overflow: 'auto' }}>
+          {error ? <div className="ysm-banner ysm-banner--error">{error}</div> : null}
+          {busy ? <div className="ysm-banner ysm-banner--busy">{busy}</div> : null}
+
+          {sales.length === 0 && !settings.gettingStartedDismissed ? (
+            <div className="ysm-getting-started" role="region" aria-label="Getting started">
+              <div className="ysm-getting-started-head">
+                <span className="ysm-getting-started-kicker">Quick start</span>
+                <button
+                  type="button"
+                  className="ysm-getting-started-dismiss"
+                  onClick={() => persist({ settings: { ...settings, gettingStartedDismissed: true } })}
+                >
+                  Dismiss
+                </button>
+              </div>
+              <ol className="ysm-getting-started-steps">
+                <li>
+                  <strong>Add photos</strong> — flyer or screenshot with an address. We read text on your device; the smart
+                  reader runs when you’re online.
+                </li>
+                <li>
+                  <strong>Pin each stop</strong> — open the sale, fix the address if needed, tap <strong>Put on map</strong>.
+                </li>
+                <li>
+                  <strong>Plan the drive</strong> — in Trip planner, set where you’re starting from, choose the day, then
+                  build your route.
+                </li>
+              </ol>
             </div>
           ) : null}
 
-          <h2 style={{ fontSize: '1rem', margin: '0 0 10px' }}>Starting point</h2>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 12 }}>
-            <input
-              value={homeInput}
-              onChange={(e) => setHomeInput(e.target.value)}
-              placeholder="Street, city, state"
-              style={{
-                flex: '1 1 180px',
-                padding: '10px 12px',
-                borderRadius: 8,
-                border: '1px solid #475569',
-                background: '#1e293b',
-              }}
-            />
-            <button
-              type="button"
-              onClick={onGeocodeHome}
-              style={btn()}
-            >
-              Use this address
-            </button>
-            <button type="button" onClick={onUseMyLocation} style={btn()}>
-              Use where I am now
-            </button>
-          </div>
-          {home ? (
-            <p style={{ margin: '0 0 16px', fontSize: 13, color: '#94a3b8' }}>
-              {home.label || `${home.lat.toFixed(4)}, ${home.lon.toFixed(4)}`}
-            </p>
-          ) : (
-            <p style={{ margin: '0 0 16px', fontSize: 13, color: '#64748b' }}>
-              Add a starting point to see what’s nearby and build a driving order.
-            </p>
-          )}
-
-          <h2 style={{ fontSize: '1rem', margin: '20px 0 10px' }}>Photos</h2>
-          <label
-            style={{
-              display: 'inline-block',
-              padding: '12px 16px',
-              background: '#1d4ed8',
-              borderRadius: 8,
-              fontWeight: 600,
-              marginBottom: 8,
-            }}
-          >
-            Choose photos
+          <h2 className="ysm-section-title ysm-section-title--flush">Photos</h2>
+          <p style={{ fontSize: 13, color: 'var(--ysm-text-muted)', margin: '0 0 8px', lineHeight: 1.45 }}>
+            Upload screenshots or pictures of yard sale signs and posts that include an address.
+          </p>
+          <label className="ysm-btn-primary">
+            Upload screenshots / photos
             <input type="file" accept="image/*" multiple onChange={onUpload} style={{ display: 'none' }} />
           </label>
-          <p style={{ fontSize: 13, color: '#94a3b8', margin: '8px 0 0', lineHeight: 1.45 }}>
-            You can select several photos at once. On the right: <strong>Sort list</strong> is under the map, then keyword
-            filter and <strong>Put all on map</strong>.
-          </p>
 
-          <h2 style={{ fontSize: '1rem', margin: '24px 0 10px' }}>What you’re looking for</h2>
-          <p style={{ fontSize: 13, color: '#94a3b8', margin: '0 0 8px', lineHeight: 1.45 }}>
+          <h2 className="ysm-section-title">What you’re looking for</h2>
+          <p style={{ fontSize: 13, color: 'var(--ysm-text-muted)', margin: '0 0 8px', lineHeight: 1.45 }}>
             Type words to hunt for, separated by commas (e.g. <em>Lego, Nintendo, tools</em>). Sales that mention them rank
             higher on the map and in your trip order.
           </p>
-          {interests.map((row, idx) => (
-            <div key={row.id} style={{ marginBottom: 8, display: 'grid', gap: 6 }}>
-              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                <input
-                  value={row.label}
-                  onChange={(e) => {
-                    const next = [...interests]
-                    next[idx] = { ...row, label: e.target.value }
-                    onInterestsChange(next)
-                  }}
-                  placeholder="Group name (e.g. Video games)"
-                  style={inp()}
-                />
-                <button
-                  type="button"
-                  onClick={() => {
-                    const next = interests.filter((_, i) => i !== idx)
-                    onInterestsChange(next.length ? next : defaultInterests())
-                  }}
-                  style={btnGhost()}
-                >
-                  Remove
+          <textarea
+            value={String(interests?.[0]?.keywords || '')}
+            onChange={(e) => onInterestsChange([{ id: interests?.[0]?.id || newId(), label: 'Keywords', keywords: e.target.value }])}
+            placeholder="keywords, separated by commas"
+            rows={3}
+            style={{ ...inp(), resize: 'vertical' }}
+          />
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 8, alignItems: 'center' }}>
+            <label
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                fontSize: 14,
+                color: 'var(--ysm-text-strong)',
+                cursor: 'pointer',
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={settings.showPriorityOnly}
+                onChange={(e) => {
+                  persist({ settings: { ...settings, showPriorityOnly: e.target.checked } })
+                  setRouteResult(null)
+                }}
+              />
+              Only include sales that match my keywords
+            </label>
+          </div>
+
+          <h2 className="ysm-section-title">
+            Your sales ({displayedSales.length}
+            {sales.length > 0 && displayedSales.length !== sales.length ? ` of ${sales.length}` : ''})
+          </h2>
+          <label style={{ ...labelSmall(), display: 'block', marginBottom: 10 }}>
+            Sort list
+            <select
+              value={settings.listSortMode || 'newest'}
+              onChange={(e) => {
+                persist({ settings: { ...settings, listSortMode: e.target.value } })
+                setRouteResult(null)
+              }}
+              style={inp()}
+            >
+              <option value="newest">Newest added</option>
+              <option value="distance">Distance (nearest first)</option>
+              <option value="opens">Opens soonest</option>
+              <option value="match">Best keyword matches</option>
+              <option value="title">Title (A–Z)</option>
+            </select>
+          </label>
+          <label style={{ ...labelSmall(), display: 'block', marginBottom: 14 }}>
+            Visited sales
+            <select
+              value={String(settings.hideVisitedWithinDays ?? 0)}
+              onChange={(e) => {
+                persist({ settings: { ...settings, hideVisitedWithinDays: Number(e.target.value) } })
+                setRouteResult(null)
+              }}
+              style={inp()}
+            >
+              <option value="0">Show all (don’t hide visits)</option>
+              <option value="7">Hide if visited in the last 7 days</option>
+              <option value="14">Hide if visited in the last 14 days</option>
+              <option value="30">Hide if visited in the last 30 days</option>
+              <option value="60">Hide if visited in the last 60 days</option>
+              <option value="90">Hide if visited in the last 90 days</option>
+            </select>
+          </label>
+
+          {needsReviewCount > 0 ? (
+            <div className="ysm-banner ysm-banner--review" role="status">
+              <div className="ysm-banner-review-row">
+                <span>
+                  <strong>{needsReviewCount}</strong> {needsReviewCount === 1 ? 'sale needs' : 'sales need'} a quick check
+                  (day or address) before you drive.
+                </span>
+                <button type="button" className="ysm-banner-review-btn" onClick={scrollToFirstNeedsReview}>
+                  Jump to first
                 </button>
               </div>
-              <textarea
-                value={row.keywords}
-                onChange={(e) => {
-                  const next = [...interests]
-                  next[idx] = { ...row, keywords: e.target.value }
-                  onInterestsChange(next)
-                }}
-                placeholder="words to find, separated by commas"
-                rows={2}
-                style={{ ...inp(), resize: 'vertical' }}
-              />
             </div>
-          ))}
-          <button
-            type="button"
-            onClick={() =>
-              onInterestsChange([
-                ...interests,
-                { id: newId(), label: 'New', keywords: '' },
-              ])
-            }
-            style={btnGhost()}
-          >
-            Add another group
-          </button>
+          ) : null}
+
+          {settings.showPriorityOnly ? (
+            <p style={{ fontSize: 13, color: 'var(--ysm-text-subtle)', margin: '-8px 0 12px', lineHeight: 1.45 }}>
+              The map pin button shows <strong style={{ color: 'var(--ysm-text-success)', fontWeight: 600 }}>On map</strong> when a pin exists.
+              Sales without a pin show <span className="ysm-map-badge ysm-map-badge--off">No pin yet</span>.
+            </p>
+          ) : null}
 
           <details className="ysm-details">
             <summary>Save or restore everything</summary>
-            <p style={{ fontSize: 13, color: '#94a3b8', margin: '0 0 10px', lineHeight: 1.45 }}>
+            <p style={{ fontSize: 13, color: 'var(--ysm-text-muted)', margin: '0 0 10px', lineHeight: 1.45 }}>
               Download a file with all your sales, photos, and settings—or bring them back on a new phone. Restoring
               reloads the app.
             </p>
@@ -806,7 +1484,591 @@ export default function App() {
             </div>
           </details>
 
-          <h2 style={{ fontSize: '1rem', margin: '24px 0 10px' }}>Trip planner</h2>
+          {home ? (
+            <p style={{ fontSize: 13, color: 'var(--ysm-text-subtle)', margin: '0 0 12px', lineHeight: 1.45 }}>
+              <strong style={{ color: 'var(--ysm-text-muted)', fontWeight: 600 }}>Dimmed rows</strong> are either not placed on the map
+              yet (no pin) or farther than your “How far out to include” radius in Trip planner. Use{' '}
+              <strong style={{ color: 'var(--ysm-text-muted)' }}>Put on map</strong> on a row,{' '}
+              <strong style={{ color: 'var(--ysm-text-muted)' }}>Put all eligible sales on map</strong> in Trip planner (below this
+              list), or widen that radius so nearby pins show at full brightness.
+            </p>
+          ) : null}
+          <p style={{ fontSize: 13, color: 'var(--ysm-text-subtle)', margin: '-4px 0 12px', lineHeight: 1.45 }}>
+            Tap a row to open details, mark visited, map links, and hours.
+          </p>
+          {sales.length === 0 ? (
+            <div className="ysm-empty-sales">
+              <p style={{ color: 'var(--ysm-text-muted)', fontSize: 14, margin: '0 0 8px', lineHeight: 1.5 }}>
+                No sales yet. Use <strong style={{ color: 'var(--ysm-text-strong)' }}>Upload screenshots / photos</strong>{' '}
+                above to add flyers, then scroll to <strong style={{ color: 'var(--ysm-text-strong)' }}>Trip planner</strong>{' '}
+                to set a starting point and choose <strong style={{ color: 'var(--ysm-text-strong)' }}>Plan a trip today</strong>{' '}
+                or <strong style={{ color: 'var(--ysm-text-strong)' }}>Plan a future trip</strong>.
+              </p>
+            </div>
+          ) : displayedSales.length === 0 ? (
+            <p style={{ color: 'var(--ysm-text-subtle)', fontSize: 14 }}>
+              Nothing matches your filters. Try turning off keyword-only or “visited” hiding, or add different sales.
+            </p>
+          ) : (
+            [...displayedSales]
+              .sort((a, b) => {
+                const da = dateSortKey(getSaleDayIso(a))
+                const db = dateSortKey(getSaleDayIso(b))
+                if (da !== db) return da.localeCompare(db)
+                return 0
+              })
+              .reduce((groups, s) => {
+                const key = getSaleDayIso(s) || ''
+                const last = groups[groups.length - 1]
+                if (!last || last.key !== key) groups.push({ key, items: [s] })
+                else last.items.push(s)
+                return groups
+              }, [])
+              .map((group) => {
+                const daySorted = sortSalesForList(group.items, settings.listSortMode || 'newest', home)
+                return (
+                  <div key={group.key || 'unknown'} style={{ marginTop: 10 }}>
+                    <div className="ysm-day-group-header">
+                      <div style={{ fontSize: 13, color: 'var(--ysm-text-strong)', fontWeight: 700 }}>
+                        {formatIsoDateLabel(group.key || null)}
+                      </div>
+                    </div>
+                    {daySorted.map((s) => {
+              const onMap = s.lat != null && s.lon != null
+              const keywordLine = [
+                matchSummaryLine(s.priorityScore, s.interestMatches),
+                s.interestMatches?.length ? s.interestMatches.map((m) => m.keyword).join(', ') : null,
+              ]
+                .filter(Boolean)
+                .join(' · ')
+              const mapVisitParts = []
+              if (home && onMap) {
+                mapVisitParts.push(`~${kmToMiles(haversineKm(home.lat, home.lon, s.lat, s.lon)).toFixed(1)} mi`)
+              }
+              if (s.visitedAt != null && !Number.isNaN(s.visitedAt)) {
+                mapVisitParts.push(`Visited ${shortVisitLabel(s.visitedAt)}`)
+              }
+              const mapVisitLine = mapVisitParts.length ? mapVisitParts.join(' · ') : ''
+
+              const cardOpen = saleCardOpen[s.id] === true
+              const trip = saleTripEligibility(s, activeTripIso)
+              return (
+                <div
+                  id={`ysm-sale-${s.id}`}
+                  key={s.id}
+                  className={`ysm-sale-card${withinRadius[s.id] || !home ? '' : ' ysm-sale-out'}${cardOpen ? ' is-open' : ''}`}
+                  style={{
+                    opacity: withinRadius[s.id] || !home ? 1 : 0.72,
+                  }}
+                >
+                  <div
+                    className="ysm-sale-card-header"
+                    role="button"
+                    tabIndex={0}
+                    aria-expanded={cardOpen}
+                    onClick={(e) => {
+                      if (eventTargetIsInsideButton(e.target)) return
+                      setSaleCardBodyMounted((m) => ({ ...m, [s.id]: true }))
+                      setSaleCardOpen((prev) => ({ ...prev, [s.id]: !(prev[s.id] === true) }))
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key !== 'Enter' && e.key !== ' ') return
+                      if (eventTargetIsInsideButton(e.target)) return
+                      e.preventDefault()
+                      setSaleCardBodyMounted((m) => ({ ...m, [s.id]: true }))
+                      setSaleCardOpen((prev) => ({ ...prev, [s.id]: !(prev[s.id] === true) }))
+                    }}
+                  >
+                    <div style={{ flex: 1, minWidth: 0, paddingRight: 4 }}>
+                      <div
+                        style={{
+                          fontWeight: 600,
+                          fontSize: 15,
+                          lineHeight: 1.3,
+                          color: 'var(--ysm-text)',
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          display: '-webkit-box',
+                          WebkitLineClamp: 2,
+                          WebkitBoxOrient: 'vertical',
+                        }}
+                      >
+                        {displaySaleTitle(s.title)}
+                      </div>
+                      {settings.showPriorityOnly && !onMap ? (
+                        <div
+                          style={{
+                            display: 'flex',
+                            flexWrap: 'wrap',
+                            gap: 6,
+                            alignItems: 'center',
+                            marginTop: 6,
+                          }}
+                        >
+                          <span
+                            className="ysm-map-badge ysm-map-badge--off"
+                            title="Not geocoded yet—use Put on map"
+                          >
+                            No pin yet
+                          </span>
+                        </div>
+                      ) : null}
+                      {s.needsReview ? (
+                        <div className="ysm-needs-review">
+                          <span className="ysm-badge-review">Needs review</span>
+                          <p className="ysm-needs-review-text">
+                            AI isn’t perfect — double-check the address and day before you drive.
+                          </p>
+                          <button
+                            type="button"
+                            className="ysm-btn-looks-good"
+                            onClick={(e) => {
+                              e.preventDefault()
+                              e.stopPropagation()
+                              updateSaleField(s.id, { needsReview: false })
+                            }}
+                          >
+                            Looks good
+                          </button>
+                        </div>
+                      ) : null}
+                      {keywordLine ? (
+                        <div
+                          className="ysm-sale-meta-line ysm-sale-meta-line--keywords"
+                          title="Keyword matching (separate from map pin)"
+                        >
+                          {keywordLine}
+                        </div>
+                      ) : null}
+                      {!trip.ok ? (
+                        <div className="ysm-sale-meta-line" style={{ color: 'var(--ysm-text-warning)' }} title={trip.reason}>
+                          {trip.reason}
+                        </div>
+                      ) : null}
+                      {mapVisitLine ? (
+                        <div className="ysm-sale-meta-line ysm-sale-meta-line--map">{mapVisitLine}</div>
+                      ) : null}
+                    </div>
+                    <div
+                      style={{
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: 6,
+                        flexShrink: 0,
+                        alignItems: 'stretch',
+                        width: 108,
+                        marginTop: 2,
+                      }}
+                    >
+                      <button
+                        type="button"
+                        className={`ysm-summary-map-btn${geocodingSaleId === s.id ? ' ysm-summary-map-btn--working' : ''}${onMap ? ' ysm-summary-map-btn--on-map' : ''}`}
+                        onClick={(e) => {
+                          e.preventDefault()
+                          e.stopPropagation()
+                          if (!onMap) geocodeSale(s.id)
+                        }}
+                        disabled={
+                          !s.addressQuery?.trim() ||
+                          !!busySaleId ||
+                          geocodingSaleId === s.id ||
+                          (!!busy && geocodingSaleId !== s.id) ||
+                          onMap
+                        }
+                        title={
+                          onMap
+                            ? 'Pin already placed — open the card to update the address or refresh the pin'
+                            : 'Look up this address and add a pin'
+                        }
+                      >
+                        {geocodingSaleId === s.id ? 'Working…' : onMap ? 'On map' : 'Put on map'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.preventDefault()
+                          e.stopPropagation()
+                          ;(async () => {
+                            try {
+                              const blob = await getSaleImageBlob(s.id)
+                              undoSaleRef.current = JSON.parse(JSON.stringify(s))
+                              undoBlobRef.current = blob
+                              setUndoDeleteLabel((s.title || s.addressQuery || 'Sale').slice(0, 56))
+                              scheduleUndoExpiry()
+                              await deleteSaleImage(s.id)
+                              persist({ sales: removeSale(loadState().sales, s.id) })
+                              setRouteResult(null)
+                              setSaleCardOpen((prev) => {
+                                const next = { ...prev }
+                                delete next[s.id]
+                                return next
+                              })
+                              setSaleCardBodyMounted((prev) => {
+                                const next = { ...prev }
+                                delete next[s.id]
+                                return next
+                              })
+                            } catch (err) {
+                              setError(err.message || String(err))
+                            }
+                          })()
+                        }}
+                        style={{ ...btnGhost(), flexShrink: 0 }}
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </div>
+                  {saleCardBodyMounted[s.id] ? (
+                  <div className="ysm-sale-body" hidden={!cardOpen}>
+                    <SaleThumb saleId={s.id} />
+                    <label style={{ ...labelSmall(), marginTop: 10 }}>
+                      Address (fix if it looks wrong)
+                      <input
+                        value={s.addressQuery}
+                        onChange={(e) => updateSaleField(s.id, { addressQuery: e.target.value })}
+                        style={inp()}
+                      />
+                    </label>
+                    <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                      <button
+                        type="button"
+                        onClick={() => geocodeSale(s.id)}
+                        disabled={
+                          !s.addressQuery?.trim() ||
+                          !!busySaleId ||
+                          geocodingSaleId === s.id ||
+                          (!!busy && geocodingSaleId !== s.id)
+                        }
+                        style={btn()}
+                      >
+                        {s.lat != null && s.lon != null ? 'Update map pin' : 'Put on map'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => reparseSale(s.id)}
+                        disabled={busySaleId === s.id}
+                        style={btnGhost()}
+                        title="Re-run OCR and the smart reader to refresh address, day, and times"
+                      >
+                        {busySaleId === s.id ? 'Reading…' : 'Read photo again'}
+                      </button>
+                    </div>
+                    {s.lat != null && s.lon != null ? (
+                      <div
+                        style={{
+                          fontSize: 14,
+                          marginTop: 10,
+                          display: 'flex',
+                          gap: 16,
+                          flexWrap: 'wrap',
+                        }}
+                      >
+                        <a
+                          href={buildGoogleMapsPlaceUrl(s.lat, s.lon, s.title)}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          style={{ color: 'var(--ysm-text-link)', fontWeight: 500 }}
+                        >
+                          Google Maps
+                        </a>
+                        <a
+                          href={buildAppleMapsPlaceUrl(s.lat, s.lon, s.title)}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          style={{ color: 'var(--ysm-text-link)', fontWeight: 500 }}
+                        >
+                          Apple Maps
+                        </a>
+                      </div>
+                    ) : null}
+                    <div
+                      style={{
+                        marginTop: 12,
+                        paddingTop: 12,
+                        borderTop: '1px solid var(--ysm-border)',
+                      }}
+                    >
+                      {s.visitedAt != null && !Number.isNaN(s.visitedAt) ? (
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+                          <span style={{ fontSize: 14, color: 'var(--ysm-text-success)', fontWeight: 600 }}>
+                            Visited {new Date(s.visitedAt).toLocaleDateString(undefined, {
+                              month: 'short',
+                              day: 'numeric',
+                              year: 'numeric',
+                            })}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => updateSaleField(s.id, { visitedAt: null })}
+                            style={btnGhost()}
+                          >
+                            Forget visit
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => updateSaleField(s.id, { visitedAt: Date.now() })}
+                          style={btn()}
+                        >
+                          Mark as visited
+                        </button>
+                      )}
+                    </div>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 12 }}>
+                      <label style={labelSmall()}>
+                        Day (optional)
+                        <input
+                          type="date"
+                          value={normalizeIsoDate(s.saleDate) || getSaleDayIso(s) || ''}
+                          onChange={(e) => updateSaleField(s.id, { saleDate: normalizeIsoDate(e.target.value) })}
+                          style={inp()}
+                        />
+                      </label>
+                      <label style={labelSmall()}>
+                        Opens
+                        <input
+                          type="time"
+                          value={timeInputValue(s.openMinutes)}
+                          onChange={(e) =>
+                            updateSaleField(s.id, { openMinutes: parseTimeInputValue(e.target.value) })
+                          }
+                          style={inp()}
+                        />
+                      </label>
+                      <label style={labelSmall()}>
+                        Close (optional)
+                        <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 4 }}>
+                          <input
+                            type="time"
+                            value={timeInputValue(s.closeMinutes)}
+                            onChange={(e) =>
+                              updateSaleField(s.id, {
+                                closeMinutes: e.target.value ? parseTimeInputValue(e.target.value) : null,
+                              })
+                            }
+                            style={{ ...inp(), marginTop: 0, flex: 1 }}
+                          />
+                          <button
+                            type="button"
+                            onClick={() => updateSaleField(s.id, { closeMinutes: null })}
+                            style={btnGhost()}
+                          >
+                            Clear
+                          </button>
+                        </div>
+                      </label>
+                    </div>
+                    <details className="ysm-details ysm-subdetails" style={{ marginTop: 12 }}>
+                      <summary>Advanced · full text from photo</summary>
+                      <p style={{ fontSize: 12, color: 'var(--ysm-text-subtle)', margin: '0 0 8px', lineHeight: 1.45 }}>
+                        Only open this if something looks wrong—you can fix the text here.
+                      </p>
+                      <textarea
+                        value={s.rawText}
+                        onChange={(e) => updateSaleField(s.id, { rawText: e.target.value, interestsRefresh: true })}
+                        rows={4}
+                        style={{ ...inp(), resize: 'vertical', fontSize: 15 }}
+                      />
+                    </details>
+                  </div>
+                  ) : null}
+                </div>
+              )
+                    })}
+                  </div>
+                )
+              })
+          )}
+
+          <h2 className="ysm-section-title">Trip planner</h2>
+          <div style={{ display: 'grid', gap: 10, marginBottom: 10 }}>
+            <div>
+              <p style={{ margin: '0 0 8px', fontSize: 12, color: 'var(--ysm-text-muted)', fontWeight: 600, letterSpacing: '0.02em' }}>
+                Starting point
+              </p>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                <input
+                  value={homeInput}
+                  onChange={(e) => setHomeInput(e.target.value)}
+                  placeholder="Street, city, state"
+                  style={{
+                    ...inp(),
+                    flex: '1 1 180px',
+                    minWidth: 0,
+                    marginTop: 0,
+                    padding: '10px 12px',
+                  }}
+                />
+                <button type="button" onClick={onGeocodeHome} style={btn()}>
+                  Use this address
+                </button>
+                <button type="button" onClick={onUseMyLocation} style={btn()}>
+                  Use where I am now
+                </button>
+              </div>
+              {home ? (
+                <p style={{ margin: '8px 0 0', fontSize: 13, color: 'var(--ysm-text-muted)', lineHeight: 1.45 }}>
+                  {home.label || `${home.lat.toFixed(4)}, ${home.lon.toFixed(4)}`}
+                </p>
+              ) : (
+                <p style={{ margin: '8px 0 0', fontSize: 13, color: 'var(--ysm-text-subtle)', lineHeight: 1.45 }}>
+                  Add a starting point to see what’s nearby and build a driving order.
+                </p>
+              )}
+            </div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'center' }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 14, color: 'var(--ysm-text-strong)' }}>
+                <input
+                  type="radio"
+                  name="trip-day-mode"
+                  checked={(settings.tripDayMode || 'today') === 'today'}
+                  onChange={() => {
+                    persist({ settings: { ...settings, tripDayMode: 'today' } })
+                    setRouteResult(null)
+                  }}
+                />
+                Plan a trip today
+              </label>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 14, color: 'var(--ysm-text-strong)' }}>
+                <input
+                  type="radio"
+                  name="trip-day-mode"
+                  checked={(settings.tripDayMode || 'today') === 'future'}
+                  onChange={() => {
+                    persist({
+                      settings: { ...settings, tripDayMode: 'future', tripDayIso: settings.tripDayIso || todayIsoLocal() },
+                    })
+                    setRouteResult(null)
+                  }}
+                />
+                Plan a future trip
+              </label>
+            </div>
+            {(settings.tripDayMode || 'today') === 'future' ? (
+              <label style={labelSmall()}>
+                Trip day
+                <input
+                  type="date"
+                  value={normalizeIsoDate(settings.tripDayIso) || ''}
+                  onChange={(e) => {
+                    persist({ settings: { ...settings, tripDayIso: normalizeIsoDate(e.target.value) } })
+                    setRouteResult(null)
+                  }}
+                  style={inp()}
+                />
+              </label>
+            ) : (
+              <p style={{ margin: 0, fontSize: 13, color: 'var(--ysm-text-muted)' }}>
+                Trip day: <strong style={{ color: 'var(--ysm-text-strong)' }}>{formatIsoDateLabel(activeTripIso)}</strong>. Only sales with
+                “Day” set to this date are eligible.
+              </p>
+            )}
+            <p style={{ margin: 0, fontSize: 13, color: 'var(--ysm-text-subtle)', lineHeight: 1.45 }}>
+              Eligible for {formatIsoDateLabel(activeTripIso)}:{' '}
+              <strong style={{ color: 'var(--ysm-text-strong)' }}>{tripEligibleSales.length}</strong> · Not eligible:{' '}
+              <strong style={{ color: 'var(--ysm-text-strong)' }}>{Math.max(0, displayedSales.length - tripEligibleSales.length)}</strong>
+            </p>
+            {home?.lat != null && home?.lon != null && activeTripIso ? (
+              <div
+                className={`ysm-weather-strip ysm-weather-strip--${tripWeather?.level || 'ok'}`}
+                role="status"
+                aria-live="polite"
+              >
+                <div className="ysm-weather-strip-top">
+                  <span className="ysm-weather-strip-label">Trip day weather</span>
+                  <button
+                    type="button"
+                    className="ysm-weather-refresh"
+                    onClick={() => refreshTripWeather()}
+                    disabled={weatherLoading}
+                  >
+                    {weatherLoading ? 'Refreshing…' : 'Refresh'}
+                  </button>
+                </div>
+                {weatherLoading ? (
+                  <span>Checking weather for {formatIsoDateLabel(activeTripIso)}…</span>
+                ) : tripWeather ? (
+                  <>
+                    <span className="ysm-weather-headline">{tripWeather.headline}</span>
+                    {tripWeather.detail ? (
+                      <span className="ysm-weather-detail">{tripWeather.detail}</span>
+                    ) : null}
+                  </>
+                ) : null}
+              </div>
+            ) : (
+              <p style={{ margin: 0, fontSize: 12, color: 'var(--ysm-text-subtle)', lineHeight: 1.45 }}>
+                Add a starting point above to see a simple weather hint for your trip day (Open-Meteo; no API key).
+              </p>
+            )}
+            <button
+              type="button"
+              onClick={bulkGeocodeMissing}
+              aria-busy={bulkGeocodeStatus?.phase === 'loading'}
+              style={{
+                ...btnGhost(),
+                justifySelf: 'start',
+                width: 'fit-content',
+                maxWidth: '100%',
+                padding: '6px 10px',
+                fontSize: 12,
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 8,
+              }}
+              disabled={!!busy || !!busySaleId}
+            >
+              {bulkGeocodeStatus?.phase === 'loading' ? (
+                <>
+                  <span className="ysm-btn-spinner" aria-hidden />
+                  <span>Finding {bulkGeocodeStatus.total} address(es)…</span>
+                </>
+              ) : (
+                'Put all eligible sales on map'
+              )}
+            </button>
+            {bulkGeocodeStatus?.phase === 'done' ? (
+              <div className="ysm-bulk-summary" role="status">
+                <p className="ysm-bulk-summary-line ysm-bulk-summary-line--ok">
+                  <strong>Map pins:</strong>{' '}
+                  {bulkGeocodeStatus.placed === 0
+                    ? 'None added this run.'
+                    : bulkGeocodeStatus.placed === 1
+                      ? '1 sale placed on the map.'
+                      : `${bulkGeocodeStatus.placed} sales placed on the map.`}
+                  {bulkGeocodeStatus.failed > 0
+                    ? ` ${bulkGeocodeStatus.failed} couldn’t be placed (map lookup failed).`
+                    : ''}
+                  {bulkGeocodeStatus.noAddressQueryIds?.length > 0
+                    ? ` ${bulkGeocodeStatus.noAddressQueryIds.length} still need a clearer address typed in the card.`
+                    : ''}
+                </p>
+                {(bulkGeocodeStatus.failedIds?.length > 0 || bulkGeocodeStatus.noAddressQueryIds?.length > 0) && (
+                  <div className="ysm-bulk-jump">
+                    <span className="ysm-bulk-jump-label">Jump to sale</span>
+                    <div className="ysm-bulk-jump-btns">
+                      {[
+                        ...new Set([
+                          ...(bulkGeocodeStatus.failedIds || []),
+                          ...(bulkGeocodeStatus.noAddressQueryIds || []),
+                        ]),
+                      ].map((id) => {
+                        const sale = sales.find((x) => x.id === id)
+                        const label = (sale?.title || sale?.addressQuery || 'Sale').trim().slice(0, 28)
+                        return (
+                          <button key={id} type="button" className="ysm-bulk-jump-btn" onClick={() => scrollToSaleId(id)}>
+                            {label || 'Sale'}
+                          </button>
+                        )
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
+            ) : null}
+          </div>
           <details className="ysm-details" style={{ marginTop: 0 }}>
             <summary>Driving assumptions (tap to change)</summary>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 8 }}>
@@ -856,24 +2118,117 @@ export default function App() {
               style={inp()}
             />
           </label>
+          <label style={{ ...labelSmall(), marginTop: 12 }}>
+            Route style
+            <select
+              value={normalizeRouteStrategy(settings.routeStrategy)}
+              onChange={(e) => {
+                persist({
+                  settings: { ...settings, routeStrategy: normalizeRouteStrategy(e.target.value) },
+                })
+                setRouteResult(null)
+              }}
+              style={{ ...inp(), width: '100%' }}
+            >
+              <option value="fastest">Shortest driving (minimize time on the road)</option>
+              <option value="keywords">Prioritize keyword matches, then shorter drives</option>
+            </select>
+          </label>
           <button type="button" onClick={runPlan} style={{ ...btn(), marginTop: 12, width: '100%' }}>
             Plan my driving order
           </button>
           {routeResult?.message ? (
-            <p style={{ fontSize: 13, color: '#fcd34d', marginTop: 8 }}>{routeResult.message}</p>
+            <p style={{ fontSize: 13, color: 'var(--ysm-text-warning)', marginTop: 8 }}>{routeResult.message}</p>
           ) : null}
           {routeResult?.ordered?.length ? (
             <>
-              <ol style={{ paddingLeft: 20, fontSize: 14, color: '#e2e8f0' }}>
-                {routeResult.ordered.map((s, i) => (
-                  <li key={s.id} style={{ marginBottom: 8 }}>
-                    <strong>{i + 1}.</strong> {s.title}{' '}
-                    <span style={{ color: '#94a3b8' }}>
-                      — about {minutesToLabel(s.plannedArrivalMinutes)} (~{Math.round(s.travelFromPreviousMinutes)} min
-                      drive)
-                    </span>
-                  </li>
-                ))}
+              {routeResult.orderExplanation ? (
+                <p style={{ fontSize: 12, color: 'var(--ysm-text-subtle)', marginTop: 10, lineHeight: 1.5 }}>
+                  {routeResult.orderExplanation}
+                </p>
+              ) : null}
+              {tripDriveSummary.totalDriveMinutes > 0 || tripDriveSummary.totalMiles > 0 ? (
+                <p className="ysm-trip-summary" role="status">
+                  Trip summary (estimate):{' '}
+                  {tripDriveSummary.totalMiles > 0 ? (
+                    <>~{tripDriveSummary.totalMiles.toFixed(1)} mi driving</>
+                  ) : null}
+                  {tripDriveSummary.totalMiles > 0 && tripDriveSummary.totalDriveMinutes > 0 ? ' · ' : null}
+                  {tripDriveSummary.totalDriveMinutes > 0 ? (
+                    <>~{tripDriveSummary.totalDriveMinutes} min on the road</>
+                  ) : null}
+                  . Straight-line distance between stops; not live traffic.
+                </p>
+              ) : null}
+              {routeResult.ordered.length > 1 ? (
+                <p style={{ fontSize: 12, color: 'var(--ysm-text-subtle)', margin: '10px 0 0', lineHeight: 1.45 }}>
+                  Reorder stops with ↑ / ↓. Map links and times update to match.
+                </p>
+              ) : null}
+              <ol
+                style={{
+                  paddingLeft: 0,
+                  listStyle: 'none',
+                  margin: '10px 0 0',
+                  fontSize: 14,
+                  color: 'var(--ysm-text-strong)',
+                }}
+              >
+                {routeResult.ordered.map((s, i) => {
+                  const n = routeResult.ordered.length
+                  const atTop = i === 0
+                  const atBottom = i === n - 1
+                  return (
+                    <li key={s.id} style={{ marginBottom: 10, display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+                      {n > 1 ? (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 4, flexShrink: 0 }}>
+                          <button
+                            type="button"
+                            aria-label={`Move up: ${s.title || 'stop'}`}
+                            disabled={atTop}
+                            onClick={() => moveRouteStop(i, -1)}
+                            style={{
+                              ...btnGhost(),
+                              padding: '4px 8px',
+                              fontSize: 13,
+                              lineHeight: 1.1,
+                              opacity: atTop ? 0.35 : 1,
+                              cursor: atTop ? 'not-allowed' : 'pointer',
+                            }}
+                          >
+                            ↑
+                          </button>
+                          <button
+                            type="button"
+                            aria-label={`Move down: ${s.title || 'stop'}`}
+                            disabled={atBottom}
+                            onClick={() => moveRouteStop(i, 1)}
+                            style={{
+                              ...btnGhost(),
+                              padding: '4px 8px',
+                              fontSize: 13,
+                              lineHeight: 1.1,
+                              opacity: atBottom ? 0.35 : 1,
+                              cursor: atBottom ? 'not-allowed' : 'pointer',
+                            }}
+                          >
+                            ↓
+                          </button>
+                        </div>
+                      ) : null}
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <strong>{i + 1}.</strong> {s.title}{' '}
+                        <span style={{ color: 'var(--ysm-text-muted)' }}>
+                          — about {minutesToLabel(s.plannedArrivalMinutes)} (~{Math.round(s.travelFromPreviousMinutes)}{' '}
+                          min drive)
+                        </span>
+                        {s.arrivalAfterClose ? (
+                          <span style={{ color: 'var(--ysm-text-warning)', fontSize: 12 }}> (arrives after closing)</span>
+                        ) : null}
+                      </div>
+                    </li>
+                  )
+                })}
               </ol>
               {home ? (
                 <div style={{ display: 'grid', gap: 8, marginTop: 12 }}>
@@ -922,394 +2277,98 @@ export default function App() {
                   >
                     Open route in Apple Maps
                   </a>
-                  <p style={{ margin: 0, fontSize: 12, color: '#64748b' }}>
+                  <p style={{ margin: 0, fontSize: 12, color: 'var(--ysm-text-subtle)' }}>
                     Tip: Google Maps usually follows this order best. Apple Maps sometimes changes multi-stop trips.
                   </p>
                 </div>
               ) : null}
             </>
           ) : null}
-        </section>
 
-        <section style={{ padding: 20, overflow: 'auto', background: '#0b1220' }}>
-          <SaleMap
-            home={home}
-            sales={displayedSales}
-            routeLegs={routeResult?.legs}
-            radiusMiles={home ? settings.searchRadiusMiles : 0}
-          />
-
-          <label style={{ ...labelSmall(), display: 'block', marginTop: 14 }}>
-            Sort list
-            <select
-              value={settings.listSortMode || 'newest'}
-              onChange={(e) => {
-                persist({ settings: { ...settings, listSortMode: e.target.value } })
-                setRouteResult(null)
-              }}
-              style={inp()}
-            >
-              <option value="newest">Newest added</option>
-              <option value="distance">Distance (nearest first)</option>
-              <option value="opens">Opens soonest</option>
-              <option value="match">Best keyword matches</option>
-              <option value="title">Title (A–Z)</option>
-            </select>
-          </label>
-
-          <div style={{ marginTop: 14 }}>
-            <div
-              style={{
-                display: 'flex',
-                flexWrap: 'wrap',
-                gap: 12,
-                alignItems: 'center',
-              }}
-            >
-              <label
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 8,
-                  fontSize: 14,
-                  color: '#e2e8f0',
-                  cursor: 'pointer',
-                }}
-              >
-                <input
-                  type="checkbox"
-                  checked={settings.showPriorityOnly}
-                  onChange={(e) => {
-                    persist({ settings: { ...settings, showPriorityOnly: e.target.checked } })
-                    setRouteResult(null)
-                  }}
-                />
-                Only sales that match my keywords
-              </label>
-              <button
-                type="button"
-                onClick={bulkGeocodeMissing}
-                style={btnGhost()}
-                disabled={!!busy || !!busySaleId}
-              >
-                Put all on map
-              </button>
-            </div>
-            <label style={{ ...labelSmall(), display: 'block', marginTop: 12 }}>
-              Visited sales
-              <select
-                value={String(settings.hideVisitedWithinDays ?? 0)}
-                onChange={(e) => {
-                  persist({ settings: { ...settings, hideVisitedWithinDays: Number(e.target.value) } })
-                  setRouteResult(null)
-                }}
-                style={inp()}
-              >
-                <option value="0">Show all (don’t hide visits)</option>
-                <option value="7">Hide if visited in the last 7 days</option>
-                <option value="14">Hide if visited in the last 14 days</option>
-                <option value="30">Hide if visited in the last 30 days</option>
-                <option value="60">Hide if visited in the last 60 days</option>
-                <option value="90">Hide if visited in the last 90 days</option>
-              </select>
-            </label>
+          <h2 className="ysm-section-title">Map</h2>
+          <div className="ysm-map-panel">
+            <SaleMap
+              home={home}
+              autoCenter={autoCenter}
+              sales={displayedSales}
+              routeLegs={routeResult?.legs}
+              radiusMiles={home ? settings.searchRadiusMiles : 0}
+              height="min(58vh, 520px)"
+            />
           </div>
+        </section>
+      </main>
 
-          <h2 style={{ fontSize: '1rem', margin: '20px 0 10px' }}>
-            Your sales ({displayedSales.length}
-            {sales.length > 0 && displayedSales.length !== sales.length ? ` of ${sales.length}` : ''})
-          </h2>
-          <p style={{ fontSize: 13, color: '#64748b', margin: '-4px 0 12px', lineHeight: 1.45 }}>
-            Tap a row to open details, mark visited, map links, and hours.
-          </p>
-          {sales.length === 0 ? (
-            <p style={{ color: '#64748b', fontSize: 14 }}>No sales yet. Add some photos to get started.</p>
-          ) : displayedSales.length === 0 ? (
-            <p style={{ color: '#64748b', fontSize: 14 }}>
-              Nothing matches your filters. Try turning off keyword-only or “visited” hiding, or add different sales.
-            </p>
-          ) : (
-            displayedSales.map((s, idx) => {
-              const metaBits = []
-              if (s.displayName) metaBits.push('On map')
-              if (home && s.lat != null) {
-                metaBits.push(`~${kmToMiles(haversineKm(home.lat, home.lon, s.lat, s.lon)).toFixed(1)} mi`)
-              }
-              const metaLine = [
-                matchSummaryLine(s.priorityScore, s.interestMatches),
-                s.interestMatches?.length ? s.interestMatches.map((m) => m.keyword).join(', ') : null,
-                metaBits.length ? metaBits.join(' · ') : null,
-                s.visitedAt != null && !Number.isNaN(s.visitedAt)
-                  ? `Visited ${shortVisitLabel(s.visitedAt)}`
-                  : null,
-              ]
-                .filter(Boolean)
-                .join(' · ')
-
-              return (
-                <details
-                  key={s.id}
-                  className={`ysm-sale-card${withinRadius[idx] || !home ? '' : ' ysm-sale-out'}`}
-                  style={{
-                    opacity: withinRadius[idx] || !home ? 1 : 0.72,
-                  }}
-                  open={saleCardOpen[s.id] === true}
-                  onToggle={(e) => {
-                    setSaleCardOpen((prev) => ({ ...prev, [s.id]: e.currentTarget.open }))
-                  }}
-                >
-                  <summary>
-                    <div style={{ flex: 1, minWidth: 0, paddingRight: 4 }}>
-                      <div
-                        style={{
-                          fontWeight: 600,
-                          fontSize: 15,
-                          lineHeight: 1.3,
-                          overflow: 'hidden',
-                          textOverflow: 'ellipsis',
-                          display: '-webkit-box',
-                          WebkitLineClamp: 2,
-                          WebkitBoxOrient: 'vertical',
-                        }}
-                      >
-                        {s.title}
+      {groundMode ? (
+        <div className="ysm-ground" role="dialog" aria-modal="true" aria-label="On-the-ground checklist">
+          <div className="ysm-ground-backdrop" onClick={() => setGroundMode(false)} role="presentation" />
+          <div className="ysm-ground-panel">
+            <div className="ysm-ground-head">
+              <h2 className="ysm-ground-title">On the ground</h2>
+              <p className="ysm-ground-lede">
+                Addresses and times from your saved list. Everything stays on this device — works when map tiles won’t load.
+              </p>
+              <div className="ysm-ground-actions">
+                <button type="button" className="ysm-ground-close" onClick={() => setGroundMode(false)}>
+                  Close
+                </button>
+                <button type="button" className="ysm-ground-share" onClick={() => shareTripList()}>
+                  Share trip
+                </button>
+                <button type="button" className="ysm-ground-close" onClick={() => copyTripList()}>
+                  Copy list
+                </button>
+              </div>
+            </div>
+            {!activeTripIso || groundStops.length === 0 ? (
+              <p className="ysm-ground-empty">
+                Set a trip day and add sales for that date, or tap Plan my driving order first.
+              </p>
+            ) : (
+              <ol className="ysm-ground-list">
+                {groundStops.map((s, i) => {
+                  const addr = String(
+                    s.addressQuery || bestGeocodeQueryForSale(s) || displaySaleTitle(s.title) || '',
+                  ).trim()
+                  const open = s.openMinutes != null ? minutesToLabel(s.openMinutes) : '—'
+                  const close = s.closeMinutes != null ? minutesToLabel(s.closeMinutes) : ''
+                  const timeLine = close ? `${open} – ${close}` : `Opens ${open}`
+                  return (
+                    <li key={s.id} className="ysm-ground-item">
+                      <div className="ysm-ground-item-head">
+                        <span className="ysm-ground-stop-num">{i + 1}</span>
+                        <span className="ysm-ground-stop-title">{displaySaleTitle(s.title)}</span>
                       </div>
-                      <div
-                        style={{
-                          fontSize: 12,
-                          color: '#94a3b8',
-                          marginTop: 4,
-                          lineHeight: 1.35,
-                          overflow: 'hidden',
-                          textOverflow: 'ellipsis',
-                          whiteSpace: 'nowrap',
-                        }}
-                      >
-                        {metaLine}
-                      </div>
+                      <div className="ysm-ground-item-addr">{addr}</div>
+                      <div className="ysm-ground-item-time">{timeLine}</div>
                       {s.lat != null && s.lon != null ? (
-                        <div
-                          style={{
-                            fontSize: 13,
-                            color: '#86efac',
-                            fontWeight: 600,
-                            marginTop: 8,
-                            letterSpacing: 0.02,
-                          }}
-                        >
-                          Added to map
-                        </div>
-                      ) : null}
-                    </div>
-                    <div
-                      style={{
-                        display: 'flex',
-                        flexDirection: 'column',
-                        gap: 6,
-                        flexShrink: 0,
-                        alignItems: 'stretch',
-                        width: 108,
-                        marginTop: 2,
-                      }}
-                    >
-                      <button
-                        type="button"
-                        className={`ysm-summary-map-btn${geocodingSaleId === s.id ? ' ysm-summary-map-btn--working' : ''}`}
-                        onClick={(e) => {
-                          e.preventDefault()
-                          e.stopPropagation()
-                          geocodeSale(s.id)
-                        }}
-                        disabled={
-                          !s.addressQuery?.trim() ||
-                          !!busySaleId ||
-                          geocodingSaleId === s.id ||
-                          (!!busy && geocodingSaleId !== s.id)
-                        }
-                      >
-                        {geocodingSaleId === s.id ? 'Working…' : 'Put on map'}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.preventDefault()
-                          e.stopPropagation()
-                          ;(async () => {
-                            try {
-                              const blob = await getSaleImageBlob(s.id)
-                              undoSaleRef.current = JSON.parse(JSON.stringify(s))
-                              undoBlobRef.current = blob
-                              setUndoDeleteLabel((s.title || s.addressQuery || 'Sale').slice(0, 56))
-                              scheduleUndoExpiry()
-                              await deleteSaleImage(s.id)
-                              persist({ sales: removeSale(loadState().sales, s.id) })
-                              setRouteResult(null)
-                              setSaleCardOpen((prev) => {
-                                const next = { ...prev }
-                                delete next[s.id]
-                                return next
-                              })
-                            } catch (err) {
-                              setError(err.message || String(err))
-                            }
-                          })()
-                        }}
-                        style={{ ...btnGhost(), flexShrink: 0 }}
-                      >
-                        Delete
-                      </button>
-                    </div>
-                  </summary>
-                  <div className="ysm-sale-body">
-                    <SaleThumb saleId={s.id} />
-                    <label style={{ ...labelSmall(), marginTop: 10 }}>
-                      Address (fix if it looks wrong)
-                      <input
-                        value={s.addressQuery}
-                        onChange={(e) => updateSaleField(s.id, { addressQuery: e.target.value })}
-                        style={inp()}
-                      />
-                    </label>
-                    <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-                      <button
-                        type="button"
-                        onClick={() => geocodeSale(s.id)}
-                        disabled={
-                          !s.addressQuery?.trim() ||
-                          !!busySaleId ||
-                          geocodingSaleId === s.id ||
-                          (!!busy && geocodingSaleId !== s.id)
-                        }
-                        style={btn()}
-                      >
-                        Put on map
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => reparseSale(s.id)}
-                        disabled={busySaleId === s.id}
-                        style={btnGhost()}
-                        title="Read this photo again for better text"
-                      >
-                        {busySaleId === s.id ? 'Reading…' : 'Read photo again'}
-                      </button>
-                    </div>
-                    {s.lat != null && s.lon != null ? (
-                      <div
-                        style={{
-                          fontSize: 14,
-                          marginTop: 10,
-                          display: 'flex',
-                          gap: 16,
-                          flexWrap: 'wrap',
-                        }}
-                      >
                         <a
                           href={buildGoogleMapsPlaceUrl(s.lat, s.lon, s.title)}
                           target="_blank"
                           rel="noopener noreferrer"
-                          style={{ color: '#93c5fd', fontWeight: 500 }}
+                          className="ysm-ground-maps-link"
                         >
-                          Google Maps
+                          Open in Google Maps
                         </a>
-                        <a
-                          href={buildAppleMapsPlaceUrl(s.lat, s.lon, s.title)}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          style={{ color: '#93c5fd', fontWeight: 500 }}
-                        >
-                          Apple Maps
-                        </a>
-                      </div>
-                    ) : null}
-                    <div
-                      style={{
-                        marginTop: 12,
-                        paddingTop: 12,
-                        borderTop: '1px solid #334155',
-                      }}
-                    >
-                      {s.visitedAt != null && !Number.isNaN(s.visitedAt) ? (
-                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
-                          <span style={{ fontSize: 14, color: '#86efac', fontWeight: 600 }}>
-                            Visited {new Date(s.visitedAt).toLocaleDateString(undefined, {
-                              month: 'short',
-                              day: 'numeric',
-                              year: 'numeric',
-                            })}
-                          </span>
-                          <button
-                            type="button"
-                            onClick={() => updateSaleField(s.id, { visitedAt: null })}
-                            style={btnGhost()}
-                          >
-                            Forget visit
-                          </button>
-                        </div>
                       ) : (
-                        <button
-                          type="button"
-                          onClick={() => updateSaleField(s.id, { visitedAt: Date.now() })}
-                          style={btn()}
-                        >
-                          Mark as visited
-                        </button>
+                        <span className="ysm-ground-no-pin">
+                          No pin yet — open the sale below when you’re online and tap Put on map.
+                        </span>
                       )}
-                    </div>
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 12 }}>
-                      <label style={labelSmall()}>
-                        Opens
-                        <input
-                          type="time"
-                          value={timeInputValue(s.openMinutes)}
-                          onChange={(e) =>
-                            updateSaleField(s.id, { openMinutes: parseTimeInputValue(e.target.value) })
-                          }
-                          style={inp()}
-                        />
-                      </label>
-                      <label style={labelSmall()}>
-                        Close (optional)
-                        <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 4 }}>
-                          <input
-                            type="time"
-                            value={timeInputValue(s.closeMinutes)}
-                            onChange={(e) =>
-                              updateSaleField(s.id, {
-                                closeMinutes: e.target.value ? parseTimeInputValue(e.target.value) : null,
-                              })
-                            }
-                            style={{ ...inp(), marginTop: 0, flex: 1 }}
-                          />
-                          <button
-                            type="button"
-                            onClick={() => updateSaleField(s.id, { closeMinutes: null })}
-                            style={btnGhost()}
-                          >
-                            Clear
-                          </button>
-                        </div>
-                      </label>
-                    </div>
-                    <details className="ysm-details ysm-subdetails" style={{ marginTop: 12 }}>
-                      <summary>Advanced · full text from photo</summary>
-                      <p style={{ fontSize: 12, color: '#64748b', margin: '0 0 8px', lineHeight: 1.45 }}>
-                        Only open this if something looks wrong—you can fix the text here.
-                      </p>
-                      <textarea
-                        value={s.rawText}
-                        onChange={(e) => updateSaleField(s.id, { rawText: e.target.value, interestsRefresh: true })}
-                        rows={4}
-                        style={{ ...inp(), resize: 'vertical', fontSize: 15 }}
-                      />
-                    </details>
-                  </div>
-                </details>
-              )
-            })
-          )}
-        </section>
-      </main>
+                    </li>
+                  )
+                })}
+              </ol>
+            )}
+          </div>
+        </div>
+      ) : null}
+
+      {shareToast ? (
+        <div className="ysm-toast" role="status">
+          {shareToast}
+        </div>
+      ) : null}
 
       {undoDeleteLabel ? (
         <div className="ysm-undo-snack" role="status">
@@ -1326,19 +2385,22 @@ export default function App() {
 function btn() {
   return {
     padding: '10px 14px',
-    borderRadius: 8,
-    border: '1px solid #334155',
-    background: '#334155',
+    borderRadius: 10,
+    border: '1px solid var(--ysm-btn-border)',
+    background: 'var(--ysm-btn-bg)',
+    color: 'var(--ysm-btn-fg)',
     fontWeight: 600,
+    boxShadow: '0 1px 3px rgba(0, 0, 0, 0.25)',
   }
 }
 
 function btnGhost() {
   return {
     padding: '8px 10px',
-    borderRadius: 8,
-    border: '1px solid #475569',
-    background: 'transparent',
+    borderRadius: 10,
+    border: '1px solid var(--ysm-ghost-border)',
+    background: 'var(--ysm-ghost-bg)',
+    color: 'var(--ysm-text)',
     fontSize: 13,
   }
 }
@@ -1347,13 +2409,14 @@ function inp() {
   return {
     width: '100%',
     padding: '8px 10px',
-    borderRadius: 8,
-    border: '1px solid #475569',
-    background: '#1e293b',
+    borderRadius: 10,
+    border: '1px solid var(--ysm-input-border)',
+    background: 'var(--ysm-input-bg)',
+    color: 'var(--ysm-text)',
     marginTop: 4,
   }
 }
 
 function labelSmall() {
-  return { display: 'block', fontSize: 12, color: '#94a3b8' }
+  return { display: 'block', fontSize: 12, color: 'var(--ysm-text-muted)' }
 }

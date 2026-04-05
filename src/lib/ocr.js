@@ -1,14 +1,42 @@
-import Tesseract from 'tesseract.js'
+import { createWorker, PSM } from 'tesseract.js'
 
-export async function runOcrOnFile(file, onProgress) {
-  const { data } = await Tesseract.recognize(file, 'eng', {
-    logger: (m) => {
-      if (m.status === 'recognizing text' && onProgress) {
-        onProgress(Math.round(m.progress * 100))
-      }
-    },
-  })
-  return String(data.text || '').trim()
+function mergeOcrTexts(parts) {
+  const seen = new Set()
+  const lines = []
+  for (const p of parts) {
+    for (const line of String(p || '').split(/\r?\n/)) {
+      const t = line.trim()
+      if (!t) continue
+      const key = t.toLowerCase()
+      if (seen.has(key)) continue
+      seen.add(key)
+      lines.push(t)
+    }
+  }
+  return lines.join('\n')
+}
+
+async function recognizeWithPsm(image, psm, onLogger) {
+  const worker = await createWorker('eng', 1, onLogger ? { logger: (m) => onLogger(m) } : {})
+  try {
+    await worker.setParameters({ tessedit_pageseg_mode: psm })
+    const { data } = await worker.recognize(image)
+    return String(data.text || '').trim()
+  } finally {
+    await worker.terminate()
+  }
+}
+
+/**
+ * @param {Blob|File} image
+ * @param {(m: { status?: string; progress?: number }) => void} [onLogger]  Tesseract loading + recognition progress
+ */
+export async function runOcrOnFile(image, onLogger) {
+  const [a, b] = await Promise.all([
+    recognizeWithPsm(image, PSM.SINGLE_BLOCK, onLogger),
+    recognizeWithPsm(image, PSM.SPARSE_TEXT),
+  ])
+  return mergeOcrTexts([a, b])
 }
 
 /** Pick a line that looks like a street address (very rough). */

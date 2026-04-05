@@ -13,6 +13,59 @@ export function normalizeHideVisitedDays(v) {
   return HIDE_VISITED_DAYS.has(n) ? n : 0
 }
 
+const TRIP_DAY_MODES = new Set(['today', 'future'])
+
+export function normalizeTripDayMode(v) {
+  return TRIP_DAY_MODES.has(v) ? v : 'today'
+}
+
+const ROUTE_STRATEGIES = new Set(['fastest', 'keywords'])
+
+/** Fastest = minimize driving between stops; keywords = favor interest matches, then distance. */
+export function normalizeRouteStrategy(v) {
+  return ROUTE_STRATEGIES.has(v) ? v : 'keywords'
+}
+
+const COLOR_SCHEMES = new Set(['dark', 'light'])
+
+/** UI appearance: dark (default) or light. */
+export function normalizeColorScheme(v) {
+  return COLOR_SCHEMES.has(v) ? v : 'dark'
+}
+
+export function normalizeIsoDate(v) {
+  const s = String(v || '').trim()
+  if (!s) return null
+  // Prefer the canonical HTML date input format.
+  const iso = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/)
+  if (iso) {
+    const yyyy = iso[1]
+    const mm = String(Math.min(12, Math.max(1, Number(iso[2])))).padStart(2, '0')
+    const dd = String(Math.min(31, Math.max(1, Number(iso[3])))).padStart(2, '0')
+    return `${yyyy}-${mm}-${dd}`
+  }
+
+  // Some environments (older webviews / non-date inputs) may yield MM/DD/YYYY.
+  const us = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/)
+  if (us) {
+    const mm = String(Math.min(12, Math.max(1, Number(us[1])))).padStart(2, '0')
+    const dd = String(Math.min(31, Math.max(1, Number(us[2])))).padStart(2, '0')
+    const yyyy = String(Number(us[3]))
+    if (/^\d{4}$/.test(yyyy)) return `${yyyy}-${mm}-${dd}`
+  }
+
+  // Occasionally: YYYY/MM/DD
+  const ymd = s.match(/^(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})$/)
+  if (ymd) {
+    const yyyy = String(Number(ymd[1]))
+    const mm = String(Math.min(12, Math.max(1, Number(ymd[2])))).padStart(2, '0')
+    const dd = String(Math.min(31, Math.max(1, Number(ymd[3])))).padStart(2, '0')
+    if (/^\d{4}$/.test(yyyy)) return `${yyyy}-${mm}-${dd}`
+  }
+
+  return null
+}
+
 function loadRaw() {
   try {
     const raw = localStorage.getItem(KEY)
@@ -37,13 +90,19 @@ export function loadState() {
         showPriorityOnly: false,
         listSortMode: 'newest',
         hideVisitedWithinDays: 0,
+        tripDayMode: 'today',
+        tripDayIso: null,
+        routeStrategy: 'keywords',
+        colorScheme: 'dark',
+        gettingStartedDismissed: false,
       },
     }
   }
+  const interestsRaw = Array.isArray(raw.interests) ? raw.interests : null
   return {
     home: raw.home ?? null,
     sales: Array.isArray(raw.sales) ? raw.sales : [],
-    interests: Array.isArray(raw.interests) ? raw.interests : defaultInterests(),
+    interests: normalizeInterests(interestsRaw),
     settings: {
       avgKmh: Number(raw.settings?.avgKmh) || 40,
       dwellMinutes: Number(raw.settings?.dwellMinutes) || 20,
@@ -51,6 +110,11 @@ export function loadState() {
       showPriorityOnly: Boolean(raw.settings?.showPriorityOnly),
       listSortMode: normalizeListSortMode(raw.settings?.listSortMode),
       hideVisitedWithinDays: normalizeHideVisitedDays(raw.settings?.hideVisitedWithinDays),
+      tripDayMode: normalizeTripDayMode(raw.settings?.tripDayMode),
+      tripDayIso: normalizeIsoDate(raw.settings?.tripDayIso),
+      routeStrategy: normalizeRouteStrategy(raw.settings?.routeStrategy),
+      colorScheme: normalizeColorScheme(raw.settings?.colorScheme),
+      gettingStartedDismissed: Boolean(raw.settings?.gettingStartedDismissed),
     },
   }
 }
@@ -67,7 +131,7 @@ export function writeFullState(state) {
   const normalized = {
     home: state.home ?? null,
     sales: Array.isArray(state.sales) ? state.sales : [],
-    interests: Array.isArray(state.interests) ? state.interests : defaultInterests(),
+    interests: normalizeInterests(Array.isArray(state.interests) ? state.interests : null),
     settings: {
       avgKmh: Number(state.settings?.avgKmh) || 40,
       dwellMinutes: Number(state.settings?.dwellMinutes) || 20,
@@ -75,6 +139,11 @@ export function writeFullState(state) {
       showPriorityOnly: Boolean(state.settings?.showPriorityOnly),
       listSortMode: normalizeListSortMode(state.settings?.listSortMode),
       hideVisitedWithinDays: normalizeHideVisitedDays(state.settings?.hideVisitedWithinDays),
+      tripDayMode: normalizeTripDayMode(state.settings?.tripDayMode),
+      tripDayIso: normalizeIsoDate(state.settings?.tripDayIso),
+      routeStrategy: normalizeRouteStrategy(state.settings?.routeStrategy),
+      colorScheme: normalizeColorScheme(state.settings?.colorScheme),
+      gettingStartedDismissed: Boolean(state.settings?.gettingStartedDismissed),
     },
   }
   localStorage.setItem(KEY, JSON.stringify(normalized))
@@ -82,10 +151,35 @@ export function writeFullState(state) {
 }
 
 export function defaultInterests() {
+  return [{ id: crypto.randomUUID(), label: 'Keywords', keywords: 'jewelry,video games,tools' }]
+}
+
+function normalizeInterests(rows) {
+  // New UX: one unified keyword list. For backward compat, merge any older grouped rows into one.
+  if (!Array.isArray(rows) || rows.length === 0) return defaultInterests()
+  const parts = []
+  for (const r of rows) {
+    const raw = String(r?.keywords || '')
+    raw
+      .split(/[,;\n]+/)
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .forEach((kw) => parts.push(kw))
+  }
+  const seen = new Set()
+  const deduped = []
+  for (const p of parts) {
+    const key = p.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    deduped.push(p)
+  }
   return [
-    { id: crypto.randomUUID(), label: 'Jewelry', keywords: 'jewelry,jewellery,gold,silver,rings,necklace,watches' },
-    { id: crypto.randomUUID(), label: 'Video games', keywords: 'video games,games,xbox,playstation,nintendo,console,retro' },
-    { id: crypto.randomUUID(), label: 'Tools', keywords: 'tools,drill,saw,wrench,ladder' },
+    {
+      id: crypto.randomUUID(),
+      label: 'Keywords',
+      keywords: deduped.join(', '),
+    },
   ]
 }
 

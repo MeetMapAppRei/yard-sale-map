@@ -1,11 +1,14 @@
 /**
  * Calls server-side vision parse when deployed (Vercel /api). No API key in the client.
+ * @param {AbortSignal} [options.signal]  pass a timed AbortController so slow networks don’t hang forever
  */
-export async function parseScreenshotWithAi(imageBase64, mimeType) {
+export async function parseScreenshotWithAi(imageBase64, mimeType, options = {}) {
+  const { signal } = options
   const res = await fetch('/api/parse-screenshot', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ imageBase64, mimeType: mimeType || 'image/jpeg' }),
+    signal,
   })
   const text = await res.text()
   let data

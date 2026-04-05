@@ -1,8 +1,9 @@
 import { guessAddressLine } from './ocr.js'
-import { extractOpenMinutes, minutesFromHHMM24 } from './parseTimes.js'
+import { extractOpenMinutes } from './parseTimes.js'
+import { dedupeOccurrencesByDate, extractSaleSchedule, mergeAiSchedule } from './parseSaleSchedule.js'
 
 /**
- * @param {null | { summary_text?: string, address_line?: string, title?: string, open_time_24h?: string | null, close_time_24h?: string | null }} ai
+ * @param {null | { summary_text?: string, address_line?: string, title?: string, occurrences?: Array<{ date_iso?: string, open_time_24h?: string | null, close_time_24h?: string | null }> }} ai
  * @param {string} ocrText
  */
 export function mergeOcrAndAi(ai, ocrText) {
@@ -18,13 +19,15 @@ export function mergeOcrAndAi(ai, ocrText) {
   }
   if (ai?.address_line) addressGuess = String(ai.address_line).trim()
   if (ai?.title) title = String(ai.title).slice(0, 80)
-  if (ai?.open_time_24h != null) {
-    const om = minutesFromHHMM24(String(ai.open_time_24h))
-    if (om != null) openMinutes = om
-  }
-  if (ai?.close_time_24h != null) {
-    const cm = minutesFromHHMM24(String(ai.close_time_24h))
-    if (cm != null) closeMinutes = cm
+  // Vision model summary often has readable dates even when Tesseract misses colored flyer text.
+  const schedule = dedupeOccurrencesByDate([
+    ...extractSaleSchedule(text),
+    ...extractSaleSchedule(String(ai?.summary_text || '')),
+    ...mergeAiSchedule(ai, rawText),
+  ])
+  if (schedule.length === 1) {
+    if (schedule[0].openMinutes != null) openMinutes = schedule[0].openMinutes
+    if (schedule[0].closeMinutes != null) closeMinutes = schedule[0].closeMinutes
   }
 
   return {
@@ -33,5 +36,6 @@ export function mergeOcrAndAi(ai, ocrText) {
     title,
     openMinutes,
     closeMinutes,
+    schedule,
   }
 }

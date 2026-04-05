@@ -1,6 +1,6 @@
 import { MapContainer, TileLayer, Marker, Popup, Polyline, Circle, useMap } from 'react-leaflet'
 import L from 'leaflet'
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
 import 'leaflet/dist/leaflet.css'
 
 import iconRetinaUrl from 'leaflet/dist/images/marker-icon-2x.png'
@@ -44,8 +44,54 @@ function FitBounds({ points, padding = [24, 24] }) {
   return null
 }
 
+function RecenterWhenAutoCenterChanges({ home, autoCenter }) {
+  const map = useMap()
+  useEffect(() => {
+    if (home) return
+    if (!autoCenter) return
+    try {
+      map.setView([autoCenter.lat, autoCenter.lon], Math.max(12, map.getZoom() || 0), { animate: false })
+    } catch {
+      /* ignore */
+    }
+  }, [map, home, autoCenter])
+  return null
+}
+
+/** List/column height changes (e.g. collapsing sale cards) resize the map box; Leaflet must be told or tiles can break on mobile. */
+function InvalidateSizeWhenContainerResizes() {
+  const map = useMap()
+  const mapRef = useRef(map)
+  mapRef.current = map
+  useEffect(() => {
+    const el = map.getContainer()
+    if (typeof ResizeObserver === 'undefined') {
+      const onWin = () => {
+        try {
+          mapRef.current.invalidateSize({ animate: false })
+        } catch {
+          /* ignore */
+        }
+      }
+      window.addEventListener('resize', onWin)
+      return () => window.removeEventListener('resize', onWin)
+    }
+    const ro = new ResizeObserver(() => {
+      try {
+        mapRef.current.invalidateSize({ animate: false })
+      } catch {
+        /* ignore */
+      }
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [map])
+  return null
+}
+
 export default function SaleMap({
   home,
+  autoCenter,
   sales,
   routeLegs,
   radiusMiles,
@@ -54,6 +100,8 @@ export default function SaleMap({
   const withCoords = (sales || []).filter((s) => s.lat != null && s.lon != null)
   const center = home
     ? [home.lat, home.lon]
+    : autoCenter
+      ? [autoCenter.lat, autoCenter.lon]
     : withCoords[0]
       ? [withCoords[0].lat, withCoords[0].lon]
       : [39.8283, -98.5795]
@@ -65,13 +113,16 @@ export default function SaleMap({
 
   const fitPoints = []
   if (home) fitPoints.push({ lat: home.lat, lon: home.lon })
+  if (!home && autoCenter) fitPoints.push({ lat: autoCenter.lat, lon: autoCenter.lon })
   withCoords.forEach((s) => fitPoints.push({ lat: s.lat, lon: s.lon }))
 
   const radiusM = radiusMiles * 1609.34
 
   return (
-    <div style={{ height, width: '100%', borderRadius: 12, overflow: 'hidden', border: '1px solid #334155' }}>
+    <div style={{ height, width: '100%', borderRadius: 12, overflow: 'hidden', border: '1px solid var(--ysm-border)' }}>
       <MapContainer center={center} zoom={11} style={{ height: '100%', width: '100%' }} scrollWheelZoom>
+        <InvalidateSizeWhenContainerResizes />
+        <RecenterWhenAutoCenterChanges home={home} autoCenter={autoCenter} />
         <TileLayer
           attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
           url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
@@ -80,6 +131,11 @@ export default function SaleMap({
         {home ? (
           <Marker position={[home.lat, home.lon]} icon={priorityIcon('#38bdf8')}>
             <Popup>Starting point</Popup>
+          </Marker>
+        ) : null}
+        {!home && autoCenter ? (
+          <Marker position={[autoCenter.lat, autoCenter.lon]} icon={priorityIcon('#60a5fa')}>
+            <Popup>Your location</Popup>
           </Marker>
         ) : null}
         {home && radiusMiles > 0 ? <Circle center={[home.lat, home.lon]} radius={radiusM} pathOptions={{ color: '#64748b', fillOpacity: 0.05 }} /> : null}

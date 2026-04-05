@@ -61,12 +61,15 @@ export default async function handler(req, res) {
   const userText = `Extract these fields for the flyer/post in the image:
 - title: short human title (e.g. "Multi-family sale")
 - address_line: best full street address + city + state + ZIP if visible; else best address fragment
-- open_time_24h: opening time as "HH:MM" 24h clock, or null if unknown
-- close_time_24h: closing time as "HH:MM" 24h, or null if unknown
-- summary_text: all readable sale-related text, concatenated sensibly
+- occurrences: array of one or more sale days. If the flyer lists multiple days (Fri + Sat), include one entry per day.
+  - date_iso: "YYYY-MM-DD" (REQUIRED whenever any date/time appears — e.g. "Thu Apr 2 2026", "4/2/2026", "When: ...")
+  - open_time_24h: "HH:MM" 24h clock, or null if unknown
+  - close_time_24h: "HH:MM" 24h, or null if unknown
+  If NO date is visible anywhere, return [].
+- summary_text: all readable sale-related text, concatenated sensibly. MUST include the sale date/time line verbatim if present (e.g. "When: Thu, Apr 2, 2026 @ 8:00 AM - 2:00 PM").
 
 JSON shape exactly:
-{"title":"","address_line":"","open_time_24h":null,"close_time_24h":null,"summary_text":""}`
+{"title":"","address_line":"","occurrences":[{"date_iso":"","open_time_24h":null,"close_time_24h":null}],"summary_text":""}`
 
   const model = process.env.ANTHROPIC_MODEL || 'claude-3-5-haiku-20241022'
 
@@ -143,8 +146,7 @@ JSON shape exactly:
     return jsonResponse(res, 200, {
       title: String(parsed.title || '').trim(),
       address_line: String(parsed.address_line || '').trim(),
-      open_time_24h: parsed.open_time_24h ?? null,
-      close_time_24h: parsed.close_time_24h ?? null,
+      occurrences: Array.isArray(parsed.occurrences) ? parsed.occurrences : [],
       summary_text: String(parsed.summary_text || '').trim(),
     })
   } catch (e) {
