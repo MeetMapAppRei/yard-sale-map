@@ -39,6 +39,18 @@ export async function runOcrOnFile(image, onLogger) {
   return mergeOcrTexts([a, b])
 }
 
+/**
+ * Strip common OCR/UI junk after a US state (e.g. "Randolph, NJ 6" from a people-count or icon).
+ * Does not remove ZIP codes (5 digits or 5+4).
+ */
+export function sanitizeAddressLine(s) {
+  let t = String(s || '').trim()
+  if (!t) return t
+  // Trailing ", ST 6" where 6 is a single digit (not part of ZIP)
+  t = t.replace(/,\s*([A-Z]{2})\s+(\d)\s*$/i, ', $1')
+  return t.trim()
+}
+
 /** Pick a line that looks like a street address (very rough). */
 export function guessAddressLine(text) {
   const lines = String(text)
@@ -52,8 +64,11 @@ export function guessAddressLine(text) {
     if (hasNumber.test(line)) s += 2
     if (streetish.test(line)) s += 3
     if (/\b[A-Za-z]+\s*,\s*[A-Z]{2}\b/.test(line)) s += 2
+    // Penalize lines that look like UI chrome (lone digit after state)
+    if (/, [A-Z]{2} \d\s*$/i.test(line)) s -= 2
     return { line, s }
   })
   scored.sort((a, b) => b.s - a.s)
-  return scored[0]?.line || lines[0] || ''
+  const best = scored[0]?.line || lines[0] || ''
+  return sanitizeAddressLine(best)
 }

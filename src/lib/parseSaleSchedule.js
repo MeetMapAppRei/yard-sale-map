@@ -39,7 +39,53 @@ function isoFromYmd(y, m, d) {
   return `${yyyy}-${mm}-${dd}`
 }
 
-function normalizeIsoDateLoose(v) {
+/** Two-digit years: 00–69 → 2000+, 70–99 → 1900+ (matches common flyer OCR). */
+function expandTwoDigitYear(y) {
+  if (y >= 100) return y
+  return y < 70 ? 2000 + y : 1900 + y
+}
+
+/**
+ * When month/day has no year, pick the soonest calendar date on/after "today"
+ * within the next few years (yard-sale listings are usually upcoming).
+ */
+function inferYearForMonthDay(month, day, now) {
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+  for (let delta = 0; delta <= 2; delta++) {
+    const y = now.getFullYear() + delta
+    const d = new Date(y, month - 1, day)
+    if (d >= today) return y
+  }
+  return now.getFullYear() + 2
+}
+
+/**
+ * One US token: 4/11, 04/10/2026, 4/11/26
+ * @param {string} token
+ * @param {Date} now
+ * @param {number | null} inheritedYear from range left side when right omits year
+ */
+function parseUsSlashToken(token, now, inheritedYear = null) {
+  const m = String(token)
+    .trim()
+    .match(/^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?$/)
+  if (!m) return null
+  const month = Number(m[1])
+  const day = Number(m[2])
+  if (month < 1 || month > 12 || day < 1 || day > 31) return null
+  let y
+  if (m[3]) {
+    y = Number(m[3])
+    if (y < 100) y = expandTwoDigitYear(y)
+  } else if (inheritedYear != null) {
+    y = inheritedYear
+  } else {
+    y = inferYearForMonthDay(month, day, now)
+  }
+  return isoFromYmd(y, month, day)
+}
+
+function normalizeIsoDateLoose(v, now = new Date()) {
   let s = String(v || '').trim().replace(/^["'`]+|["'`]+$/g, '')
   if (!s) return null
   const embedded = s.match(/\b(20\d{2}-\d{1,2}-\d{1,2})\b/)
@@ -48,6 +94,13 @@ function normalizeIsoDateLoose(v) {
   if (iso) return isoFromYmd(Number(iso[1]), Number(iso[2]), Number(iso[3]))
   const us = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/)
   if (us) return isoFromYmd(Number(us[3]), Number(us[1]), Number(us[2]))
+  const us2 = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2})$/)
+  if (us2) {
+    const y = expandTwoDigitYear(Number(us2[3]))
+    return isoFromYmd(y, Number(us2[1]), Number(us2[2]))
+  }
+  const usPlain = s.match(/^(\d{1,2})[\/\-](\d{1,2})$/)
+  if (usPlain) return parseUsSlashToken(`${usPlain[1]}/${usPlain[2]}`, now, null)
   const ymd = s.match(/^(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})$/)
   if (ymd) return isoFromYmd(Number(ymd[1]), Number(ymd[2]), Number(ymd[3]))
   return null
@@ -191,13 +244,56 @@ export function extractSaleSchedule(text, now = new Date()) {
     out.push({ isoDate: iso, openMinutes, closeMinutes })
   }
 
+  // 1c) Weekday + US slash (common on postmygaragesale.com / screenshots): "Saturday 4/11/26", "Sat 4/11"
+  const reWeekdaySlash = new RegExp(
+    String.raw`\b(?:mon|tue|wed|thu|fri|sat|sun|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b` +
+      String.raw`[^\n\r]{0,40}?(\d{1,2}/\d{1,2}(?:/\d{2,4})?)`,
+    'gi',
+  )
+  while ((m = reWeekdaySlash.exec(t)) !== null) {
+    const iso = parseUsSlashToken(m[1], now, null)
+    if (!iso) continue
+    const slice = t.slice(m.index, Math.min(t.length, m.index + 140))
+    const { openMinutes, closeMinutes } = extractTimeRangeMinutes(slice)
+    out.push({ isoDate: iso, openMinutes, closeMinutes })
+  }
+
+  // 2a) US slash ranges without full year on every side: "4/10 - 4/11", "4/11 - 4/12", "4/11-4/11"
+  const reUsRange =
+    /\b(\d{1,2}\/\d{1,2}(?:\/\d{2,4})?)\s*[-–]\s*(\d{1,2}\/\d{1,2}(?:\/\d{2,4})?)\b/gi
+  while ((m = reUsRange.exec(t)) !== null) {
+    const leftIso = parseUsSlashToken(m[1], now, null)
+    if (!leftIso) continue
+    const yLeft = Number(leftIso.slice(0, 4))
+    const rightTok = String(m[2]).trim()
+    const hasYearRight = rightTok.split('/').length >= 3
+    const rightIso = parseUsSlashToken(m[2], now, hasYearRight ? null : yLeft)
+    if (!rightIso) continue
+    const slice = t.slice(m.index, Math.min(t.length, m.index + 140))
+    const { openMinutes, closeMinutes } = extractTimeRangeMinutes(slice)
+    for (const iso of [leftIso, rightIso]) {
+      out.push({ isoDate: iso, openMinutes, closeMinutes })
+    }
+  }
+
   // 2) Numeric dates: 3/30/2026 or 2026-03-30, optionally with a time range nearby.
   const reNumeric = /\b(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{4}|\d{4}[\/\-]\d{1,2}[\/\-]\d{1,2})\b([^\n\r]{0,80})/gi
   while ((m = reNumeric.exec(t)) !== null) {
-    const iso = normalizeIsoDateLoose(m[1])
+    const iso = normalizeIsoDateLoose(m[1], now)
     if (!iso) continue
     const nearby = `${m[1]} ${m[2] || ''}`
     const { openMinutes, closeMinutes } = extractTimeRangeMinutes(nearby)
+    out.push({ isoDate: iso, openMinutes, closeMinutes })
+  }
+
+  // 2b) Standalone US dates without a 4-digit year (sites print "4/11" or "4/11/26" on their own line).
+  const reStandaloneShort = /\b(\d{1,2}\/\d{1,2}(?:\/\d{2,4})?)\b/g
+  let sm
+  while ((sm = reStandaloneShort.exec(t)) !== null) {
+    const iso = parseUsSlashToken(sm[1], now, null)
+    if (!iso) continue
+    const slice = t.slice(sm.index, Math.min(t.length, sm.index + 100))
+    const { openMinutes, closeMinutes } = extractTimeRangeMinutes(slice)
     out.push({ isoDate: iso, openMinutes, closeMinutes })
   }
 

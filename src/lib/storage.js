@@ -33,6 +33,18 @@ export function normalizeColorScheme(v) {
   return COLOR_SCHEMES.has(v) ? v : 'dark'
 }
 
+/** Guided wizard vs full single-page layout. */
+export function normalizeUiLayout(v) {
+  return v === 'full' ? 'full' : 'guided'
+}
+
+/** Current step in guided mode (1–4). */
+export function normalizeGuidedStep(v) {
+  const n = Number(v)
+  if (Number.isFinite(n) && n >= 1 && n <= 4) return Math.floor(n)
+  return 1
+}
+
 export function normalizeIsoDate(v) {
   const s = String(v || '').trim()
   if (!s) return null
@@ -95,6 +107,8 @@ export function loadState() {
         routeStrategy: 'keywords',
         colorScheme: 'dark',
         gettingStartedDismissed: false,
+        uiLayout: 'guided',
+        guidedStep: 1,
       },
     }
   }
@@ -115,6 +129,8 @@ export function loadState() {
       routeStrategy: normalizeRouteStrategy(raw.settings?.routeStrategy),
       colorScheme: normalizeColorScheme(raw.settings?.colorScheme),
       gettingStartedDismissed: Boolean(raw.settings?.gettingStartedDismissed),
+      uiLayout: normalizeUiLayout(raw.settings?.uiLayout),
+      guidedStep: normalizeGuidedStep(raw.settings?.guidedStep),
     },
   }
 }
@@ -144,6 +160,8 @@ export function writeFullState(state) {
       routeStrategy: normalizeRouteStrategy(state.settings?.routeStrategy),
       colorScheme: normalizeColorScheme(state.settings?.colorScheme),
       gettingStartedDismissed: Boolean(state.settings?.gettingStartedDismissed),
+      uiLayout: normalizeUiLayout(state.settings?.uiLayout),
+      guidedStep: normalizeGuidedStep(state.settings?.guidedStep),
     },
   }
   localStorage.setItem(KEY, JSON.stringify(normalized))

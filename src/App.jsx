@@ -22,6 +22,7 @@ import { downloadJsonBackup, importBackupJson } from './lib/backup.js'
 import { parseScreenshotWithAi, fileToBase64, blobToBase64 } from './lib/parseScreenshotApi.js'
 import { mergeOcrAndAi } from './lib/mergeAiParse.js'
 import { compressImageFile } from './lib/compressImage.js'
+import { stabilizeFile } from './lib/stabilizeFile.js'
 import { buildGoogleMapsDirectionsUrl } from './lib/googleMapsRoute.js'
 import {
   dedupeOccurrencesByDate,
@@ -445,6 +446,8 @@ export default function App() {
     routeStrategy: 'keywords',
     colorScheme: 'dark',
     gettingStartedDismissed: false,
+    uiLayout: 'guided',
+    guidedStep: 1,
   })
   const [startTime, setStartTime] = useState('08:00')
   const [routeResult, setRouteResult] = useState(null)
@@ -500,6 +503,10 @@ export default function App() {
   }, [settings.colorScheme])
 
   useEffect(() => {
+    document.documentElement.setAttribute('data-ysm-guided', settings.uiLayout !== 'full' ? 'true' : 'false')
+  }, [settings.uiLayout])
+
+  useEffect(() => {
     const s = loadState()
     const sales = migrateSaleDates(s.sales)
     setHome(s.home)
@@ -508,6 +515,14 @@ export default function App() {
     setSettings(s.settings)
     if (JSON.stringify(sales) !== JSON.stringify(s.sales)) {
       saveState({ sales })
+    }
+    try {
+      const raw = JSON.parse(localStorage.getItem('yard-sale-map-v1') || 'null')
+      if (raw?.settings && !Object.prototype.hasOwnProperty.call(raw.settings, 'uiLayout')) {
+        saveState({ settings: { ...s.settings, uiLayout: 'guided' } })
+      }
+    } catch {
+      /* ignore */
     }
   }, [])
 
@@ -646,9 +661,7 @@ export default function App() {
 
   const onUpload = async (e) => {
     const picked = Array.from(e.target.files || []).filter((f) => f.type.startsWith('image/'))
-    e.target.value = ''
     if (!picked.length) return
-    setError(null)
 
     const st0 = loadState()
     const interestRows = st0.interests
@@ -656,11 +669,32 @@ export default function App() {
     const failures = []
 
     try {
-      for (let i = 0; i < picked.length; i++) {
-        const file = picked[i]
+      // Android can revoke handles between sequential awaits — copy every file in parallel first.
+      // Avoid setState until after bytes exist (re-renders may contribute to revoked handles).
+      const copyResults = await Promise.all(
+        picked.map((originalFile, idx) =>
+          stabilizeFile(originalFile)
+            .then((file) => ({ ok: true, idx, originalFile, file }))
+            .catch((err) => ({ ok: false, idx, originalFile, err })),
+        ),
+      )
+      copyResults.sort((a, b) => a.idx - b.idx)
+      const stabilized = []
+      for (const r of copyResults) {
+        if (r.ok) stabilized.push({ originalFile: r.originalFile, file: r.file })
+        else failures.push(`${r.originalFile?.name || 'image'}: ${r.err?.message || String(r.err)}`)
+      }
+
+      setError(null)
+
+      // Now it's safe to clear the input (we have stable in-memory copies).
+      e.target.value = ''
+
+      for (let i = 0; i < stabilized.length; i++) {
+        const { originalFile, file } = stabilized[i]
         setPhotoImportProgress({
           current: i + 1,
-          total: picked.length,
+          total: stabilized.length,
           phase: 'prepare',
           ocrPct: 0,
           detail: 'Shrinking photo for storage…',
@@ -671,7 +705,7 @@ export default function App() {
           })
           newSales.push(...salesFromPhoto)
         } catch (err) {
-          failures.push(`${file.name || 'image'}: ${err.message || String(err)}`)
+          failures.push(`${originalFile?.name || 'image'}: ${err?.message || String(err)}`)
         }
       }
 
@@ -1181,6 +1215,42 @@ export default function App() {
     return Math.min(99, Math.round(base + slice * 0.06 + ocrFrac))
   }, [photoImportProgress])
 
+  const guided = settings.uiLayout !== 'full'
+  const guidedStep = Math.min(4, Math.max(1, Number(settings.guidedStep) || 1))
+  const setGuidedStep = (n) => {
+    const next = Math.min(4, Math.max(1, n))
+    persist({ settings: { ...settings, guidedStep: next } })
+  }
+
+  const renderTripTools = () => {
+    if (sales.length === 0) return null
+    return (
+      <div className="ysm-trip-tools">
+        <p className="ysm-trip-tools-label">On the road</p>
+        <div className="ysm-toolbar" role="toolbar" aria-label="Trip tools">
+          <button
+            type="button"
+            className="ysm-toolbar-btn"
+            onClick={() => setGroundMode(true)}
+            aria-describedby="ysm-ground-help"
+          >
+            On-the-ground mode
+          </button>
+          <button type="button" className="ysm-toolbar-btn" onClick={() => shareTripList()}>
+            Share trip
+          </button>
+          <button type="button" className="ysm-toolbar-btn" onClick={() => copyTripList()}>
+            Copy list
+          </button>
+        </div>
+        <p id="ysm-ground-help" className="ysm-toolbar-hint">
+          <strong>On-the-ground mode:</strong> full-screen <strong>addresses and hours</strong> for your trip (or route
+          order). Stays on this device — use when the map’s slow or you only want a simple list.
+        </p>
+      </div>
+    )
+  }
+
   return (
     <div className="ysm-shell">
       {globalPhotoBusy ? (
@@ -1206,8 +1276,17 @@ export default function App() {
                   <div className="ysm-global-busy-fill" style={{ width: `${importPct}%` }} />
                 </div>
                 <p className="ysm-global-busy-tip">
-                  When this finishes, open <strong>Trip planner</strong> below: use <strong>Plan a trip today</strong> or{' '}
-                  <strong>Plan a future trip</strong> (then choose the date).
+                  {guided ? (
+                    <>
+                      When this finishes, go to the <strong>Plan</strong> step, set your starting point, then tap{' '}
+                      <strong>Plan my driving order</strong>.
+                    </>
+                  ) : (
+                    <>
+                      When this finishes, open <strong>Trip planner</strong> below: use <strong>Plan a trip today</strong> or{' '}
+                      <strong>Plan a future trip</strong> (then choose the date).
+                    </>
+                  )}
                 </p>
                 <p className="ysm-global-busy-hint">
                   If a step sits for a bit, the app is working around slow phone photo decoding (especially on Android).
@@ -1229,66 +1308,66 @@ export default function App() {
         <div className="ysm-header-top">
           <div className="ysm-header-copy">
             <h1 className="ysm-header-title">Yard Sale Route Planner</h1>
-            <p className="ysm-header-tagline">
-              We plan a route for what you want to find—free, private, in your browser.
-            </p>
             <p className="ysm-header-lede">
-              We plan a driving route for what you want to find. Snap photos of flyers and posts—we pull out addresses and
-              times, drop pins on the map, and rank stops using your keywords (games, tools, jewelry…) so the best fits
-              come first.
+              Photograph flyers or screenshots—we read addresses and times, place pins, and rank stops with your keywords.
+              Free, private, and runs entirely in your browser.
             </p>
           </div>
-          <div className="ysm-theme-toggle" role="group" aria-label="Appearance">
+          <div className="ysm-header-actions">
+            <div className="ysm-theme-toggle" role="group" aria-label="Appearance">
+              <button
+                type="button"
+                className={
+                  normalizeColorScheme(settings.colorScheme) === 'dark'
+                    ? 'ysm-theme-toggle-btn ysm-theme-toggle-btn--active'
+                    : 'ysm-theme-toggle-btn'
+                }
+                onClick={() => persist({ settings: { ...settings, colorScheme: 'dark' } })}
+                aria-pressed={normalizeColorScheme(settings.colorScheme) === 'dark'}
+              >
+                Dark
+              </button>
+              <button
+                type="button"
+                className={
+                  normalizeColorScheme(settings.colorScheme) === 'light'
+                    ? 'ysm-theme-toggle-btn ysm-theme-toggle-btn--active'
+                    : 'ysm-theme-toggle-btn'
+                }
+                onClick={() => persist({ settings: { ...settings, colorScheme: 'light' } })}
+                aria-pressed={normalizeColorScheme(settings.colorScheme) === 'light'}
+              >
+                Light
+              </button>
+            </div>
             <button
               type="button"
-              className={
-                normalizeColorScheme(settings.colorScheme) === 'dark'
-                  ? 'ysm-theme-toggle-btn ysm-theme-toggle-btn--active'
-                  : 'ysm-theme-toggle-btn'
+              className="ysm-layout-toggle-btn"
+              onClick={() =>
+                persist({
+                  settings: {
+                    ...settings,
+                    uiLayout: guided ? 'full' : 'guided',
+                  },
+                })
               }
-              onClick={() => persist({ settings: { ...settings, colorScheme: 'dark' } })}
-              aria-pressed={normalizeColorScheme(settings.colorScheme) === 'dark'}
+              aria-pressed={guided}
             >
-              Dark
-            </button>
-            <button
-              type="button"
-              className={
-                normalizeColorScheme(settings.colorScheme) === 'light'
-                  ? 'ysm-theme-toggle-btn ysm-theme-toggle-btn--active'
-                  : 'ysm-theme-toggle-btn'
-              }
-              onClick={() => persist({ settings: { ...settings, colorScheme: 'light' } })}
-              aria-pressed={normalizeColorScheme(settings.colorScheme) === 'light'}
-            >
-              Light
+              {guided ? 'All tools' : 'Guided'}
             </button>
           </div>
         </div>
       </header>
 
-      <div className="ysm-toolbar-wrap">
-        <div className="ysm-toolbar" role="toolbar" aria-label="Trip tools">
-          <button
-            type="button"
-            className="ysm-toolbar-btn"
-            onClick={() => setGroundMode(true)}
-            aria-describedby="ysm-ground-help"
-          >
-            On-the-ground mode
-          </button>
-          <button type="button" className="ysm-toolbar-btn" onClick={() => shareTripList()}>
-            Share trip
-          </button>
-          <button type="button" className="ysm-toolbar-btn" onClick={() => copyTripList()}>
-            Copy list
-          </button>
+      {guided ? (
+        <div className="ysm-guided-banner" role="status">
+          <span className="ysm-guided-banner-badge">Guided</span>
+          <span className="ysm-guided-banner-text">
+            One step at a time—only the current step is shown. Tap <strong>All tools</strong> above for the full scrollable
+            page.
+          </span>
         </div>
-        <p id="ysm-ground-help" className="ysm-toolbar-hint">
-          <strong>On-the-ground mode:</strong> full-screen <strong>addresses and hours</strong> for your trip (or route
-          order). Stays on this device — use when the map’s slow or you only want a simple list.
-        </p>
-      </div>
+      ) : null}
 
       {offline ? (
         <div className="ysm-offline-banner" role="status">
@@ -1298,11 +1377,49 @@ export default function App() {
       ) : null}
 
       <main className="ysm-layout">
+        {guided ? (
+          <nav className="ysm-guided-stepper" aria-label="Setup steps">
+            {[
+              { n: 1, label: 'Add' },
+              { n: 2, label: 'Review' },
+              { n: 3, label: 'Plan' },
+              { n: 4, label: 'Map' },
+            ].map(({ n, label }) => (
+              <button
+                key={n}
+                type="button"
+                className={`ysm-guided-step${guidedStep === n ? ' is-active' : ''}${guidedStep > n ? ' is-done' : ''}`}
+                onClick={() => setGuidedStep(n)}
+                aria-current={guidedStep === n ? 'step' : undefined}
+              >
+                <span className="ysm-guided-step-num" aria-hidden>
+                  {n}
+                </span>
+                <span className="ysm-guided-step-label">{label}</span>
+              </button>
+            ))}
+          </nav>
+        ) : (
+          <nav className="ysm-section-nav" aria-label="Jump to section">
+            <a className="ysm-section-nav-link" href="#ysm-photos">
+              Photos
+            </a>
+            <a className="ysm-section-nav-link" href="#ysm-sales">
+              Sales
+            </a>
+            <a className="ysm-section-nav-link" href="#ysm-plan">
+              Plan
+            </a>
+            <a className="ysm-section-nav-link" href="#ysm-map">
+              Map
+            </a>
+          </nav>
+        )}
         <section className="ysm-main-inner" style={{ overflow: 'auto' }}>
           {error ? <div className="ysm-banner ysm-banner--error">{error}</div> : null}
           {busy ? <div className="ysm-banner ysm-banner--busy">{busy}</div> : null}
 
-          {sales.length === 0 && !settings.gettingStartedDismissed ? (
+          {sales.length === 0 && !settings.gettingStartedDismissed && (!guided || guidedStep === 1) ? (
             <div className="ysm-getting-started" role="region" aria-label="Getting started">
               <div className="ysm-getting-started-head">
                 <span className="ysm-getting-started-kicker">Quick start</span>
@@ -1330,7 +1447,11 @@ export default function App() {
             </div>
           ) : null}
 
-          <h2 className="ysm-section-title ysm-section-title--flush">Photos</h2>
+          {(!guided || guidedStep === 1) && (
+            <>
+          <h2 className="ysm-section-title ysm-section-title--flush" id="ysm-photos">
+            Photos
+          </h2>
           <p style={{ fontSize: 13, color: 'var(--ysm-text-muted)', margin: '0 0 8px', lineHeight: 1.45 }}>
             Upload screenshots or pictures of yard sale signs and posts that include an address.
           </p>
@@ -1339,7 +1460,9 @@ export default function App() {
             <input type="file" accept="image/*" multiple onChange={onUpload} style={{ display: 'none' }} />
           </label>
 
-          <h2 className="ysm-section-title">What you’re looking for</h2>
+          <h2 className="ysm-section-title" id="ysm-keywords">
+            What you’re looking for
+          </h2>
           <p style={{ fontSize: 13, color: 'var(--ysm-text-muted)', margin: '0 0 8px', lineHeight: 1.45 }}>
             Type words to hunt for, separated by commas (e.g. <em>Lego, Nintendo, tools</em>). Sales that mention them rank
             higher on the map and in your trip order.
@@ -1373,8 +1496,12 @@ export default function App() {
               Only include sales that match my keywords
             </label>
           </div>
+            </>
+          )}
 
-          <h2 className="ysm-section-title">
+          {(!guided || guidedStep === 2) && (
+            <>
+          <h2 className="ysm-section-title" id="ysm-sales">
             Your sales ({displayedSales.length}
             {sales.length > 0 && displayedSales.length !== sales.length ? ` of ${sales.length}` : ''})
           </h2>
@@ -1484,18 +1611,19 @@ export default function App() {
             </div>
           </details>
 
-          {home ? (
-            <p style={{ fontSize: 13, color: 'var(--ysm-text-subtle)', margin: '0 0 12px', lineHeight: 1.45 }}>
-              <strong style={{ color: 'var(--ysm-text-muted)', fontWeight: 600 }}>Dimmed rows</strong> are either not placed on the map
-              yet (no pin) or farther than your “How far out to include” radius in Trip planner. Use{' '}
-              <strong style={{ color: 'var(--ysm-text-muted)' }}>Put on map</strong> on a row,{' '}
-              <strong style={{ color: 'var(--ysm-text-muted)' }}>Put all eligible sales on map</strong> in Trip planner (below this
-              list), or widen that radius so nearby pins show at full brightness.
+          <details className="ysm-details" style={{ marginBottom: 12 }}>
+            <summary>How this list works</summary>
+            <p style={{ fontSize: 13, color: 'var(--ysm-text-subtle)', margin: '10px 0 8px', lineHeight: 1.45 }}>
+              Tap a row to open details, mark visited, map links, and hours.
             </p>
-          ) : null}
-          <p style={{ fontSize: 13, color: 'var(--ysm-text-subtle)', margin: '-4px 0 12px', lineHeight: 1.45 }}>
-            Tap a row to open details, mark visited, map links, and hours.
-          </p>
+            {home ? (
+              <p style={{ fontSize: 13, color: 'var(--ysm-text-subtle)', margin: 0, lineHeight: 1.45 }}>
+                <strong style={{ color: 'var(--ysm-text-muted)', fontWeight: 600 }}>Dimmed rows</strong> are either not on the map yet
+                (no pin) or beyond your “How far out to include” radius in Trip planner. Use <strong>Put on map</strong> on a row,{' '}
+                <strong>Put all eligible sales on map</strong> in Trip planner, or widen the radius.
+              </p>
+            ) : null}
+          </details>
           {sales.length === 0 ? (
             <div className="ysm-empty-sales">
               <p style={{ color: 'var(--ysm-text-muted)', fontSize: 14, margin: '0 0 8px', lineHeight: 1.5 }}>
@@ -1882,7 +2010,15 @@ export default function App() {
               })
           )}
 
-          <h2 className="ysm-section-title">Trip planner</h2>
+            </>
+          )}
+
+          {(!guided || guidedStep === 3) && (
+            <>
+          <h2 className="ysm-section-title" id="ysm-plan">
+            Trip planner
+          </h2>
+          {!guided && renderTripTools()}
           <div style={{ display: 'grid', gap: 10, marginBottom: 10 }}>
             <div>
               <p style={{ margin: '0 0 8px', fontSize: 12, color: 'var(--ysm-text-muted)', fontWeight: 600, letterSpacing: '0.02em' }}>
@@ -2285,7 +2421,15 @@ export default function App() {
             </>
           ) : null}
 
-          <h2 className="ysm-section-title">Map</h2>
+            </>
+          )}
+
+          {(!guided || guidedStep === 4) && (
+            <>
+              {guided && guidedStep === 4 && renderTripTools()}
+          <h2 className="ysm-section-title" id="ysm-map">
+            Map
+          </h2>
           <div className="ysm-map-panel">
             <SaleMap
               home={home}
@@ -2296,6 +2440,46 @@ export default function App() {
               height="min(58vh, 520px)"
             />
           </div>
+            </>
+          )}
+
+          {guided ? (
+            <div className="ysm-guided-footer">
+              <button
+                type="button"
+                className="ysm-guided-footer-btn ysm-guided-footer-btn--back"
+                disabled={guidedStep <= 1}
+                onClick={() => setGuidedStep(guidedStep - 1)}
+              >
+                Back
+              </button>
+              <p className="ysm-guided-footer-hint">
+                {guidedStep === 1 && 'Add flyer photos and optional keywords.'}
+                {guidedStep === 2 && 'Open each sale, fix the address if needed, tap Put on map.'}
+                {guidedStep === 3 && 'Set where you’re leaving from, pick the trip day, then plan your order.'}
+                {guidedStep === 4 && 'See pins, share your list, or use on-the-ground mode while driving.'}
+              </p>
+              {guidedStep < 4 ? (
+                <button
+                  type="button"
+                  className="ysm-guided-footer-btn ysm-guided-footer-btn--next"
+                  onClick={() => setGuidedStep(guidedStep + 1)}
+                >
+                  {guidedStep === 1 && 'Next: Review sales'}
+                  {guidedStep === 2 && 'Next: Plan trip'}
+                  {guidedStep === 3 && 'Next: Map'}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="ysm-guided-footer-btn ysm-guided-footer-btn--next"
+                  onClick={() => persist({ settings: { ...settings, uiLayout: 'full' } })}
+                >
+                  Open all tools
+                </button>
+              )}
+            </div>
+          ) : null}
         </section>
       </main>
 

@@ -1,4 +1,4 @@
-import { guessAddressLine } from './ocr.js'
+import { guessAddressLine, sanitizeAddressLine } from './ocr.js'
 import { extractOpenMinutes } from './parseTimes.js'
 import { dedupeOccurrencesByDate, extractSaleSchedule, mergeAiSchedule } from './parseSaleSchedule.js'
 
@@ -17,12 +17,16 @@ export function mergeOcrAndAi(ai, ocrText) {
   if (ai?.summary_text) {
     rawText = [String(ai.summary_text).trim(), '\n---\nAlso read from the photo:\n', text].join('')
   }
-  if (ai?.address_line) addressGuess = String(ai.address_line).trim()
+  if (String(ai?.address_line || '').trim()) {
+    addressGuess = sanitizeAddressLine(String(ai.address_line).trim())
+  }
   if (ai?.title) title = String(ai.title).slice(0, 80)
+  const aiFieldsBlob = [ai?.title, ai?.address_line, ai?.summary_text].filter(Boolean).join('\n')
   // Vision model summary often has readable dates even when Tesseract misses colored flyer text.
   const schedule = dedupeOccurrencesByDate([
     ...extractSaleSchedule(text),
     ...extractSaleSchedule(String(ai?.summary_text || '')),
+    ...extractSaleSchedule(aiFieldsBlob),
     ...mergeAiSchedule(ai, rawText),
   ])
   if (schedule.length === 1) {

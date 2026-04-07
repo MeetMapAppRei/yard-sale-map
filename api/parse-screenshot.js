@@ -4,6 +4,7 @@
  */
 
 import { checkRateLimit, parseLimitEnv } from './lib/rateLimit.js'
+import { extractSaleSchedule } from '../src/lib/parseSaleSchedule.js'
 
 function jsonResponse(res, status, body) {
   res.setHeader('Content-Type', 'application/json; charset=utf-8')
@@ -73,8 +74,8 @@ export default async function handler(req, res) {
   const userText = `Extract these fields for the flyer/post in the image:
 - title: short human title (e.g. "Multi-family sale")
 - address_line: best full street address + city + state + ZIP if visible; else best address fragment
-- occurrences: array of one or more sale days. If the flyer lists multiple days (Fri + Sat), include one entry per day.
-  - date_iso: "YYYY-MM-DD" (REQUIRED whenever any date/time appears — e.g. "Thu Apr 2 2026", "4/2/2026", "When: ...")
+  - occurrences: array of one or more sale days. If the flyer lists multiple days (Fri + Sat), include one entry per day.
+  - date_iso: "YYYY-MM-DD" (REQUIRED whenever any date/time appears — e.g. "Thu Apr 2 2026", "4/2/2026", "4/11 - 4/11", "When: ..."). If only month/day is visible (no year), infer the year from context (assume the upcoming sale year, typically the current calendar year).
   - open_time_24h: "HH:MM" 24h clock, or null if unknown
   - close_time_24h: "HH:MM" 24h, or null if unknown
   If NO date is visible anywhere, return [].
@@ -155,11 +156,29 @@ JSON shape exactly:
       return jsonResponse(res, 502, { error: 'Could not parse model JSON', detail: trimmed.slice(0, 300) })
     }
 
+    let title = String(parsed.title || '').trim()
+    let address_line = String(parsed.address_line || '').trim()
+    let summary_text = String(parsed.summary_text || '').trim()
+    let occurrences = Array.isArray(parsed.occurrences) ? parsed.occurrences : []
+
+    // Model sometimes returns empty occurrences[] even when MM/DD lines are visible — backfill from text.
+    if (!occurrences.length) {
+      const blob = [title, address_line, summary_text].filter(Boolean).join('\n')
+      const inferred = extractSaleSchedule(blob)
+      if (inferred.length) {
+        occurrences = inferred.map((row) => ({
+          date_iso: row.isoDate,
+          open_time_24h: null,
+          close_time_24h: null,
+        }))
+      }
+    }
+
     return jsonResponse(res, 200, {
-      title: String(parsed.title || '').trim(),
-      address_line: String(parsed.address_line || '').trim(),
-      occurrences: Array.isArray(parsed.occurrences) ? parsed.occurrences : [],
-      summary_text: String(parsed.summary_text || '').trim(),
+      title,
+      address_line,
+      occurrences,
+      summary_text,
     })
   } catch (e) {
     return jsonResponse(res, 500, { error: e.message || String(e) })
