@@ -1415,7 +1415,8 @@ export default function App() {
             </a>
           </nav>
         )}
-        <section className="ysm-main-inner" style={{ overflow: 'auto' }}>
+        <section className="ysm-main-inner">
+          <div className="ysm-main-inner-body">
           {error ? <div className="ysm-banner ysm-banner--error">{error}</div> : null}
           {busy ? <div className="ysm-banner ysm-banner--busy">{busy}</div> : null}
 
@@ -2442,6 +2443,8 @@ export default function App() {
           </div>
             </>
           )}
+
+          </div>
 
           {guided ? (
             <div className="ysm-guided-footer">
