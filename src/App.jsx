@@ -466,6 +466,11 @@ export default function App() {
   const [groundMode, setGroundMode] = useState(false)
   const [tripWeather, setTripWeather] = useState(null)
   const [weatherLoading, setWeatherLoading] = useState(false)
+  /** null | 'address' | 'location' — which starting-point action is running */
+  const [homeStartingPointBusy, setHomeStartingPointBusy] = useState(null)
+  /** null | 'address' | 'location' — brief confirmation after success */
+  const [homeStartingPointSuccess, setHomeStartingPointSuccess] = useState(null)
+  const homeStartingPointFeedbackTimerRef = useRef(null)
   const [shareToast, setShareToast] = useState(null)
   const [offline, setOffline] = useState(() => (typeof navigator !== 'undefined' ? !navigator.onLine : false))
   const [undoDeleteLabel, setUndoDeleteLabel] = useState(null)
@@ -596,6 +601,26 @@ export default function App() {
     return () => clearUndoTimer()
   }, [clearUndoTimer])
 
+  useEffect(() => {
+    return () => {
+      if (homeStartingPointFeedbackTimerRef.current) {
+        clearTimeout(homeStartingPointFeedbackTimerRef.current)
+        homeStartingPointFeedbackTimerRef.current = null
+      }
+    }
+  }, [])
+
+  const flashStartingPointSuccess = useCallback((kind) => {
+    if (homeStartingPointFeedbackTimerRef.current) {
+      clearTimeout(homeStartingPointFeedbackTimerRef.current)
+    }
+    setHomeStartingPointSuccess(kind)
+    homeStartingPointFeedbackTimerRef.current = setTimeout(() => {
+      setHomeStartingPointSuccess(null)
+      homeStartingPointFeedbackTimerRef.current = null
+    }, 2800)
+  }, [])
+
   const persist = useCallback(
     (patch) => {
       const next = saveState(patch)
@@ -618,25 +643,28 @@ export default function App() {
 
   const onGeocodeHome = async () => {
     setError(null)
-    setBusy('Finding your address on the map…')
+    setHomeStartingPointSuccess(null)
+    setHomeStartingPointBusy('address')
     try {
       const g = await geocodeAddress(homeInput)
       const h = { lat: g.lat, lon: g.lon, label: g.displayName }
       persist({ home: h })
+      flashStartingPointSuccess('address')
     } catch (e) {
       setError(geocodeUserMessage(e.message, homeInput))
     } finally {
-      setBusy(null)
+      setHomeStartingPointBusy(null)
     }
   }
 
   const onUseMyLocation = () => {
     setError(null)
+    setHomeStartingPointSuccess(null)
     if (!navigator.geolocation) {
       setError("This browser can't use your location. Use \"Use this address\" instead.")
       return
     }
-    setBusy('Getting location…')
+    setHomeStartingPointBusy('location')
     navigator.geolocation.getCurrentPosition(
       (pos) => {
         const h = {
@@ -645,7 +673,8 @@ export default function App() {
           label: 'Current location',
         }
         persist({ home: h })
-        setBusy(null)
+        setHomeStartingPointBusy(null)
+        flashStartingPointSuccess('location')
       },
       (err) => {
         setError(
@@ -653,7 +682,7 @@ export default function App() {
             ? 'Location is turned off or blocked. Allow location for this site, or type your address above.'
             : 'Could not get your location. Try again or use your address above.',
         )
-        setBusy(null)
+        setHomeStartingPointBusy(null)
       },
       { enableHighAccuracy: true, timeout: 15000 },
     )
@@ -2095,13 +2124,60 @@ export default function App() {
                     padding: '10px 12px',
                   }}
                 />
-                <button type="button" onClick={onGeocodeHome} style={btn()}>
-                  Use this address
+                <button
+                  type="button"
+                  onClick={onGeocodeHome}
+                  disabled={!!homeStartingPointBusy || !!busy || !!busySaleId}
+                  aria-busy={homeStartingPointBusy === 'address'}
+                  className={
+                    homeStartingPointSuccess === 'address'
+                      ? 'ysm-starting-point-btn ysm-starting-point-btn--success'
+                      : 'ysm-starting-point-btn'
+                  }
+                  style={btn()}
+                >
+                  {homeStartingPointBusy === 'address' ? (
+                    <>
+                      <span className="ysm-btn-spinner" aria-hidden />
+                      Finding address…
+                    </>
+                  ) : homeStartingPointSuccess === 'address' ? (
+                    'Saved — address set'
+                  ) : (
+                    'Use this address'
+                  )}
                 </button>
-                <button type="button" onClick={onUseMyLocation} style={btn()}>
-                  Use where I am now
+                <button
+                  type="button"
+                  onClick={onUseMyLocation}
+                  disabled={!!homeStartingPointBusy || !!busy || !!busySaleId}
+                  aria-busy={homeStartingPointBusy === 'location'}
+                  className={
+                    homeStartingPointSuccess === 'location'
+                      ? 'ysm-starting-point-btn ysm-starting-point-btn--success'
+                      : 'ysm-starting-point-btn'
+                  }
+                  style={btn()}
+                >
+                  {homeStartingPointBusy === 'location' ? (
+                    <>
+                      <span className="ysm-btn-spinner" aria-hidden />
+                      Getting your location…
+                    </>
+                  ) : homeStartingPointSuccess === 'location' ? (
+                    'Saved — using your location'
+                  ) : (
+                    'Use where I am now'
+                  )}
                 </button>
               </div>
+              {homeStartingPointSuccess && !homeStartingPointBusy ? (
+                <p className="ysm-starting-point-inline-ok" role="status">
+                  {homeStartingPointSuccess === 'address'
+                    ? 'Starting point updated from the address you entered.'
+                    : 'Starting point set to your current location.'}
+                </p>
+              ) : null}
               {home ? (
                 <p style={{ margin: '8px 0 0', fontSize: 13, color: 'var(--ysm-text-muted)', lineHeight: 1.45 }}>
                   {home.label || `${home.lat.toFixed(4)}, ${home.lon.toFixed(4)}`}
