@@ -2441,7 +2441,7 @@ export default function App() {
               ) : null}
               {routeResult.ordered.length > 1 ? (
                 <p style={{ fontSize: 12, color: 'var(--ysm-text-subtle)', margin: '10px 0 0', lineHeight: 1.45 }}>
-                  Reorder stops with ↑ / ↓. Map links and times update to match.
+                  Reorder stops with ↑ / ↓. Times update to match — open maps from the <strong>Map</strong> step.
                 </p>
               ) : null}
               <ol
@@ -2509,58 +2509,6 @@ export default function App() {
                   )
                 })}
               </ol>
-              {home ? (
-                <div style={{ display: 'grid', gap: 8, marginTop: 12 }}>
-                  <a
-                    href={buildGoogleMapsDirectionsUrl(home, routeResult.ordered.slice(0, 1))}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    style={{
-                      ...btn(),
-                      display: 'block',
-                      textAlign: 'center',
-                      textDecoration: 'none',
-                      background: '#1e40af',
-                      borderColor: '#2563eb',
-                    }}
-                  >
-                    Open only stop #1 in Google Maps
-                  </a>
-                  <a
-                    href={buildGoogleMapsDirectionsUrl(home, routeResult.ordered)}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    style={{
-                      ...btn(),
-                      display: 'block',
-                      textAlign: 'center',
-                      textDecoration: 'none',
-                      background: '#166534',
-                      borderColor: '#15803d',
-                    }}
-                  >
-                    Open route in Google Maps
-                  </a>
-                  <a
-                    href={buildAppleMapsDirectionsUrl(home, routeResult.ordered)}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    style={{
-                      ...btn(),
-                      display: 'block',
-                      textAlign: 'center',
-                      textDecoration: 'none',
-                      background: '#1e3a5f',
-                      borderColor: '#334155',
-                    }}
-                  >
-                    Open route in Apple Maps
-                  </a>
-                  <p style={{ margin: 0, fontSize: 12, color: 'var(--ysm-text-subtle)' }}>
-                    Tip: Google Maps usually follows this order best. Apple Maps sometimes changes multi-stop trips.
-                  </p>
-                </div>
-              ) : null}
             </>
           ) : null}
 
@@ -2583,6 +2531,58 @@ export default function App() {
               height="min(58vh, 520px)"
             />
           </div>
+          {routeResult?.ordered?.length > 0 && home ? (
+            <div className="ysm-maps-nav-links" style={{ display: 'grid', gap: 8, marginTop: 14 }}>
+              <a
+                href={buildGoogleMapsDirectionsUrl(home, routeResult.ordered.slice(0, 1))}
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{
+                  ...btn(),
+                  display: 'block',
+                  textAlign: 'center',
+                  textDecoration: 'none',
+                  background: '#1e40af',
+                  borderColor: '#2563eb',
+                }}
+              >
+                Open only stop #1 in Google Maps
+              </a>
+              <a
+                href={buildGoogleMapsDirectionsUrl(home, routeResult.ordered)}
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{
+                  ...btn(),
+                  display: 'block',
+                  textAlign: 'center',
+                  textDecoration: 'none',
+                  background: '#166534',
+                  borderColor: '#15803d',
+                }}
+              >
+                Open route in Google Maps
+              </a>
+              <a
+                href={buildAppleMapsDirectionsUrl(home, routeResult.ordered)}
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{
+                  ...btn(),
+                  display: 'block',
+                  textAlign: 'center',
+                  textDecoration: 'none',
+                  background: '#1e3a5f',
+                  borderColor: '#334155',
+                }}
+              >
+                Open route in Apple Maps
+              </a>
+              <p style={{ margin: 0, fontSize: 12, color: 'var(--ysm-text-subtle)' }}>
+                Tip: Google Maps usually follows this order best. Apple Maps sometimes changes multi-stop trips.
+              </p>
+            </div>
+          ) : null}
             </>
           )}
 
@@ -2602,7 +2602,8 @@ export default function App() {
                 {guidedStep === 1 && 'Set trip day, add flyer photos, and optional keywords.'}
                 {guidedStep === 2 && 'Open each sale, fix the address if needed, tap Put on map.'}
                 {guidedStep === 3 && 'Set where you’re leaving from, pick the trip day, then plan your order.'}
-                {guidedStep === 4 && 'See pins, share your list, or use on-the-ground mode while driving.'}
+                {guidedStep === 4 &&
+                  'See pins, open Google or Apple Maps with your route, share your list, or use on-the-ground mode.'}
               </p>
               {guidedStep < 4 ? (
                 <button
