@@ -1450,6 +1450,63 @@ export default function App() {
 
           {(!guided || guidedStep === 1) && (
             <>
+          {guided ? (
+            <>
+              <h2 className="ysm-section-title ysm-section-title--flush" id="ysm-trip-day">
+                Trip day
+              </h2>
+              <p style={{ fontSize: 13, color: 'var(--ysm-text-muted)', margin: '0 0 10px', lineHeight: 1.45 }}>
+                Which day are you driving? Only sales dated for this day can go on your planned route.
+              </p>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'center', marginBottom: 10 }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 14, color: 'var(--ysm-text-strong)' }}>
+                  <input
+                    type="radio"
+                    name="trip-day-mode-guided"
+                    checked={(settings.tripDayMode || 'today') === 'today'}
+                    onChange={() => {
+                      persist({ settings: { ...settings, tripDayMode: 'today' } })
+                      setRouteResult(null)
+                    }}
+                  />
+                  Plan for today
+                </label>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 14, color: 'var(--ysm-text-strong)' }}>
+                  <input
+                    type="radio"
+                    name="trip-day-mode-guided"
+                    checked={(settings.tripDayMode || 'today') === 'future'}
+                    onChange={() => {
+                      persist({
+                        settings: { ...settings, tripDayMode: 'future', tripDayIso: settings.tripDayIso || todayIsoLocal() },
+                      })
+                      setRouteResult(null)
+                    }}
+                  />
+                  Plan for another day
+                </label>
+              </div>
+              {(settings.tripDayMode || 'today') === 'future' ? (
+                <label style={{ ...labelSmall(), display: 'block', marginBottom: 14 }}>
+                  Date
+                  <input
+                    type="date"
+                    value={normalizeIsoDate(settings.tripDayIso) || ''}
+                    onChange={(e) => {
+                      persist({ settings: { ...settings, tripDayIso: normalizeIsoDate(e.target.value) } })
+                      setRouteResult(null)
+                    }}
+                    style={inp()}
+                  />
+                </label>
+              ) : (
+                <p style={{ margin: '0 0 14px', fontSize: 13, color: 'var(--ysm-text-muted)' }}>
+                  Trip day:{' '}
+                  <strong style={{ color: 'var(--ysm-text-strong)' }}>{formatIsoDateLabel(activeTripIso)}</strong>
+                </p>
+              )}
+            </>
+          ) : null}
           <h2 className="ysm-section-title ysm-section-title--flush" id="ysm-photos">
             Photos
           </h2>
@@ -2055,51 +2112,60 @@ export default function App() {
                 </p>
               )}
             </div>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'center' }}>
-              <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 14, color: 'var(--ysm-text-strong)' }}>
-                <input
-                  type="radio"
-                  name="trip-day-mode"
-                  checked={(settings.tripDayMode || 'today') === 'today'}
-                  onChange={() => {
-                    persist({ settings: { ...settings, tripDayMode: 'today' } })
-                    setRouteResult(null)
-                  }}
-                />
-                Plan a trip today
-              </label>
-              <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 14, color: 'var(--ysm-text-strong)' }}>
-                <input
-                  type="radio"
-                  name="trip-day-mode"
-                  checked={(settings.tripDayMode || 'today') === 'future'}
-                  onChange={() => {
-                    persist({
-                      settings: { ...settings, tripDayMode: 'future', tripDayIso: settings.tripDayIso || todayIsoLocal() },
-                    })
-                    setRouteResult(null)
-                  }}
-                />
-                Plan a future trip
-              </label>
-            </div>
-            {(settings.tripDayMode || 'today') === 'future' ? (
-              <label style={labelSmall()}>
-                Trip day
-                <input
-                  type="date"
-                  value={normalizeIsoDate(settings.tripDayIso) || ''}
-                  onChange={(e) => {
-                    persist({ settings: { ...settings, tripDayIso: normalizeIsoDate(e.target.value) } })
-                    setRouteResult(null)
-                  }}
-                  style={inp()}
-                />
-              </label>
+            {!guided ? (
+              <>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'center' }}>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 14, color: 'var(--ysm-text-strong)' }}>
+                    <input
+                      type="radio"
+                      name="trip-day-mode"
+                      checked={(settings.tripDayMode || 'today') === 'today'}
+                      onChange={() => {
+                        persist({ settings: { ...settings, tripDayMode: 'today' } })
+                        setRouteResult(null)
+                      }}
+                    />
+                    Plan a trip today
+                  </label>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 14, color: 'var(--ysm-text-strong)' }}>
+                    <input
+                      type="radio"
+                      name="trip-day-mode"
+                      checked={(settings.tripDayMode || 'today') === 'future'}
+                      onChange={() => {
+                        persist({
+                          settings: { ...settings, tripDayMode: 'future', tripDayIso: settings.tripDayIso || todayIsoLocal() },
+                        })
+                        setRouteResult(null)
+                      }}
+                    />
+                    Plan a future trip
+                  </label>
+                </div>
+                {(settings.tripDayMode || 'today') === 'future' ? (
+                  <label style={labelSmall()}>
+                    Trip day
+                    <input
+                      type="date"
+                      value={normalizeIsoDate(settings.tripDayIso) || ''}
+                      onChange={(e) => {
+                        persist({ settings: { ...settings, tripDayIso: normalizeIsoDate(e.target.value) } })
+                        setRouteResult(null)
+                      }}
+                      style={inp()}
+                    />
+                  </label>
+                ) : (
+                  <p style={{ margin: 0, fontSize: 13, color: 'var(--ysm-text-muted)' }}>
+                    Trip day: <strong style={{ color: 'var(--ysm-text-strong)' }}>{formatIsoDateLabel(activeTripIso)}</strong>. Only sales with
+                    “Day” set to this date are eligible.
+                  </p>
+                )}
+              </>
             ) : (
-              <p style={{ margin: 0, fontSize: 13, color: 'var(--ysm-text-muted)' }}>
-                Trip day: <strong style={{ color: 'var(--ysm-text-strong)' }}>{formatIsoDateLabel(activeTripIso)}</strong>. Only sales with
-                “Day” set to this date are eligible.
+              <p style={{ margin: '0 0 8px', fontSize: 13, color: 'var(--ysm-text-muted)', lineHeight: 1.45 }}>
+                Trip day: <strong style={{ color: 'var(--ysm-text-strong)' }}>{formatIsoDateLabel(activeTripIso)}</strong> — set on the{' '}
+                <strong>Add</strong> step if you need to change it.
               </p>
             )}
             <p style={{ margin: 0, fontSize: 13, color: 'var(--ysm-text-subtle)', lineHeight: 1.45 }}>
@@ -2457,7 +2523,7 @@ export default function App() {
                 Back
               </button>
               <p className="ysm-guided-footer-hint">
-                {guidedStep === 1 && 'Add flyer photos and optional keywords.'}
+                {guidedStep === 1 && 'Set trip day, add flyer photos, and optional keywords.'}
                 {guidedStep === 2 && 'Open each sale, fix the address if needed, tap Put on map.'}
                 {guidedStep === 3 && 'Set where you’re leaving from, pick the trip day, then plan your order.'}
                 {guidedStep === 4 && 'See pins, share your list, or use on-the-ground mode while driving.'}
