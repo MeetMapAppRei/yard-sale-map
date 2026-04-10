@@ -54,15 +54,24 @@ export function parseTimeInput(value) {
   const s = String(value || '').trim()
   if (!s) return null
   const lower = s.toLowerCase()
+  // "HH:MM" with optional am/pm  — e.g. "09:00", "9:30 AM", "14:00"
   const m = lower.match(/^(\d{1,2}):(\d{2})\s*(am|pm)?$/)
-  if (!m) return null
-  let h = parseInt(m[1], 10)
-  const min = parseInt(m[2], 10)
-  const ap = m[3]
-  if (ap === 'pm' && h < 12) h += 12
-  if (ap === 'am' && h === 12) h = 0
-  if (!ap && h <= 11) {
-    /* assume morning if no am/pm */
+  if (m) {
+    let h = parseInt(m[1], 10)
+    const min = parseInt(m[2], 10)
+    const ap = m[3]
+    if (ap === 'pm' && h < 12) h += 12
+    if (ap === 'am' && h === 12) h = 0
+    return h * 60 + min
   }
-  return h * 60 + min
+  // Bare "9am", "10pm", "9 am", "10 PM" — no colon (common on flyers / OCR output)
+  const m2 = lower.match(/^(\d{1,2})\s*(am|pm)$/)
+  if (m2) {
+    let h = parseInt(m2[1], 10)
+    const ap = m2[2]
+    if (ap === 'pm' && h < 12) h += 12
+    if (ap === 'am' && h === 12) h = 0
+    return h * 60
+  }
+  return null
 }

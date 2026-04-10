@@ -17,13 +17,14 @@ import { runOcrOnFile } from './lib/ocr.js'
 import { minutesToLabel } from './lib/parseTimes.js'
 import { planRoute, computeRouteSequence, summarizeRouteDrivingStats } from './lib/routePlanner.js'
 import { haversineKm, milesToKm } from './lib/haversine.js'
-import { putSaleImage, deleteSaleImage, getSaleImageBlob } from './lib/imageStore.js'
+import { putSaleImage, deleteSaleImage, getSaleImageBlob, deleteManySaleImages } from './lib/imageStore.js'
 import { downloadJsonBackup, importBackupJson } from './lib/backup.js'
 import { parseScreenshotWithAi, fileToBase64, blobToBase64 } from './lib/parseScreenshotApi.js'
 import { mergeOcrAndAi } from './lib/mergeAiParse.js'
 import { compressImageFile } from './lib/compressImage.js'
 import { stabilizeFile } from './lib/stabilizeFile.js'
 import { buildGoogleMapsDirectionsUrl } from './lib/googleMapsRoute.js'
+import { extractTownwideRowsFromText, extractLaserficheRowsFromOcr } from './lib/townwideSales.js'
 import {
   dedupeOccurrencesByDate,
   extractSaleSchedule,
@@ -88,7 +89,7 @@ function ocrLoggerToImportPatch(m) {
  * @param {number} createdAtOffset  ms bump so batch items keep a stable order tie-break
  * @param {(patch: { phase?: string; ocrPct?: number; detail?: string }) => void} [reportImport]  live progress for the import overlay
  */
-async function processScreenshotFile(file, interestRows, createdAtOffset = 0, reportImport) {
+async function processScreenshotFile(file, interestRows, createdAtOffset = 0, reportImport, options = {}) {
   reportImport?.({ phase: 'prepare', ocrPct: 0, detail: 'Shrinking photo for storage…' })
   let toStore
   try {
@@ -127,7 +128,200 @@ async function processScreenshotFile(file, interestRows, createdAtOffset = 0, re
     clearTimeout(tid)
   }
 
+  // If the server-side vision model returned multiple listings, trust it over OCR heuristics.
+  // This works cross-platform (web/iOS/Android) as long as you're online.
+  const aiSales = Array.isArray(ai?.sales) ? ai.sales : []
+  if (aiSales.length >= 1) {
+    const createdAtBase = Date.now() + createdAtOffset
+    const defaultState = String(options.defaultState || '').trim().toUpperCase()
+    const sales = []
+    reportImport?.({
+      phase: 'prepare',
+      ocrPct: 100,
+      detail:
+        aiSales.length > 1
+          ? `Found ${aiSales.length} sales in this screenshot… saving copies…`
+          : 'Saving photo…',
+    })
+    const isUsSlashDate = (s) => /^\d{1,2}\/\d{1,2}\/\d{4}$/.test(String(s || '').trim())
+    const cleanStreetLine = (s) => {
+      let raw = String(s || '').trim()
+      raw = raw.replace(/^[\s@#•]+/, '').trim()
+      // OCR sometimes reads the map pin icon as a leading digit:
+      // - "9 107 Fieldstone Dr"  -> "107 Fieldstone Dr"
+      // - "9107 Fieldstone Dr"   -> "107 Fieldstone Dr"
+      raw = raw.replace(/^(\d)\s+(\d{1,5}\s+)/, '$2')
+      raw = raw.replace(/^(\d)(\d{1,5}\s+)/, '$2')
+      return raw.trim()
+    }
+    const extractStreetFromContext = (text) => {
+      const t = String(text || '')
+      // Find *all* candidate street lines; OCR often includes multiple variants,
+      // e.g. "2 Cedar St" and later "9 26 Cedar St" in the same screenshot.
+      const re =
+        /\b(\d{1,5}\s+[A-Za-z0-9.'-]+(?:\s+[A-Za-z0-9.'-]+){0,6}\s+(?:St|Street|Ave|Avenue|Rd|Road|Dr|Drive|Ln|Lane|Ct|Court|Blvd|Boulevard|Way|Pkwy|Parkway|Pl|Place|Ter|Terrace)\b[^\n]*)/gi
+      const candidates = []
+      for (const m of t.matchAll(re)) {
+        const line = cleanStreetLine(m[1])
+        if (!line) continue
+        const num = (line.match(/^(\d{1,5})\b/) || [null, ''])[1]
+        const numLen = num.length
+        let score = 0
+        score += numLen // prefer more digits (26 > 2)
+        if (/,/.test(line)) score += 1
+        if (/\b(NJ|NY|PA|CT|DE|MD|MA|RI|VT|NH|ME)\b/i.test(line)) score += 1
+        candidates.push({ line, score })
+      }
+      candidates.sort((a, b) => b.score - a.score)
+      return candidates[0]?.line || ''
+    }
+    for (let j = 0; j < aiSales.length; j++) {
+      const row = aiSales[j] || {}
+      const saleId = newId()
+      await putSaleImage(saleId, toStore)
+      const streetRaw = String(row.street_address || '').trim()
+      let street = isUsSlashDate(streetRaw) ? '' : cleanStreetLine(streetRaw)
+      const town = String(row.town || '').trim()
+      const state = String(row.state || '').trim().toUpperCase() || (defaultState || '')
+      const zip = String(row.zip || '').trim()
+      const comments = String(row.comments || '').trim()
+      const streetNumLen = ((street.match(/^(\d{1,5})\b/) || [null, ''])[1] || '').length
+      if (!street || streetNumLen < 2) {
+        const recovered = extractStreetFromContext([streetRaw, town, state, zip, comments, rawText].filter(Boolean).join('\n'))
+        const recoveredNumLen = ((recovered.match(/^(\d{1,5})\b/) || [null, ''])[1] || '').length
+        if (recovered && recoveredNumLen > streetNumLen) street = recovered
+      }
+      const title = String(row.title || '').trim() || (street ? street.slice(0, 80) : town ? `${town} sale` : 'Sale')
+      const addressQuery = [street, town, state, zip].filter(Boolean).join(', ')
+      const rowText = [street, town, state, zip, comments].filter(Boolean).join('\n')
+      const { score, matches } = scoreTextAgainstInterests(rowText, interestRows)
+      const saleDate = normalizeIsoDate(row.sale_date_iso) || null
+      sales.push({
+        id: saleId,
+        title,
+        rawText: rowText,
+        addressQuery,
+        saleDate,
+        lat: null,
+        lon: null,
+        displayName: null,
+        openMinutes: row.open_time_24h ? parseTimeInputValue(row.open_time_24h) : null,
+        closeMinutes: row.close_time_24h ? parseTimeInputValue(row.close_time_24h) : null,
+        priorityScore: score,
+        interestMatches: matches,
+        createdAt: createdAtBase + j,
+        hasImage: true,
+        visitedAt: null,
+        needsReview: computeSaleNeedsReview({
+          saleDate,
+          rawText: rowText,
+          addressQuery,
+          title,
+        }),
+      })
+    }
+    return sales
+  }
+
   const merged = mergeOcrAndAi(ai, rawText)
+
+  // Laserfiche / townwide list screenshots can include MANY sales in one image.
+  // If the OCR text contains multiple "Sale Date / Rain Date / Address / Town / Comments" blocks,
+  // split into one sale per row so the map can show multiple pins.
+  const defaultState = String(options.defaultState || '').trim().toUpperCase()
+  const combinedText = [merged.rawText, rawText, String(ai?.summary_text || '')].filter(Boolean).join('\n')
+  const fromTable = extractTownwideRowsFromText(combinedText)
+  const laserRows = extractLaserficheRowsFromOcr(combinedText)
+  const townwideRows = fromTable.length >= 2 ? fromTable : laserRows
+
+  // Some OCR results prepend a single digit from the "pin" icon (e.g. "9 107 Fieldstone Dr").
+  // If we see "D <space> #### <space>" at the start, drop the leading digit.
+  const cleanStreetLine = (s) => {
+    let raw = String(s || '').trim()
+    raw = raw.replace(/^[\s@#•]+/, '').trim()
+    raw = raw.replace(/^(\d)\s+(\d{1,5}\s+)/, '$2')
+    raw = raw.replace(/^(\d)(\d{1,5}\s+)/, '$2')
+    return raw.trim()
+  }
+
+  // Also sanitize merged.addressQuery so the single-sale path doesn't show "@ 26 Cedar St" or "9 107 ..."
+  if (merged?.addressQuery) {
+    merged.addressQuery = cleanStreetLine(String(merged.addressQuery))
+  }
+
+  // Multi-row Laserfiche screenshot → split into multiple sales.
+  if (townwideRows.length >= 2) {
+    reportImport?.({
+      phase: 'prepare',
+      ocrPct: 100,
+      detail: `Found ${townwideRows.length} sales in this screenshot… saving copies…`,
+    })
+    const createdAtBase = Date.now() + createdAtOffset
+    const sales = []
+    for (let j = 0; j < townwideRows.length; j++) {
+      const r = townwideRows[j]
+      const saleId = newId()
+      await putSaleImage(saleId, toStore)
+      const addr = cleanStreetLine(String(r.address || '').trim())
+      const town = String(r.town || '').trim()
+      const title = addr ? addr.slice(0, 80) : town ? `${town} sale` : 'Sale'
+      const rowText = [addr, town, r.comments].filter(Boolean).join('\n')
+      const { score, matches } = scoreTextAgainstInterests(rowText, interestRows)
+      const addressQuery = [addr, town, /^[A-Z]{2}$/.test(defaultState) ? defaultState : null]
+        .filter(Boolean)
+        .join(', ')
+      sales.push({
+        id: saleId,
+        title,
+        rawText: rowText || merged.rawText,
+        addressQuery,
+        saleDate: r.saleDateIso || null,
+        lat: null,
+        lon: null,
+        displayName: null,
+        openMinutes: r.openMinutes ?? null,
+        closeMinutes: r.closeMinutes ?? null,
+        priorityScore: score,
+        interestMatches: matches,
+        createdAt: createdAtBase + j,
+        hasImage: true,
+        visitedAt: null,
+        needsReview: computeSaleNeedsReview({
+          saleDate: r.saleDateIso || null,
+          rawText: rowText || merged.rawText,
+          addressQuery,
+          title,
+        }),
+      })
+    }
+    return sales
+  }
+
+  // Single-row Laserfiche screenshot → patch the merged fields so we still get a day + address.
+  // This fixes the common case where the screenshot shows only one sale block.
+  if (laserRows.length === 1) {
+    const r = laserRows[0]
+    const addr = cleanStreetLine(String(r.address || '').trim())
+    const town = String(r.town || '').trim()
+    const patchedAddressQuery = [addr, town, /^[A-Z]{2}$/.test(defaultState) ? defaultState : null]
+      .filter(Boolean)
+      .join(', ')
+    const mergedAddr = String(merged.addressQuery || '').trim()
+    const shouldOverrideAddr =
+      !mergedAddr ||
+      !looksLikeAddress(mergedAddr) ||
+      /laserfiche|new submission|mm\/dd\/yyyy|default page/i.test(mergedAddr)
+    if (shouldOverrideAddr && patchedAddressQuery) merged.addressQuery = patchedAddressQuery
+
+    const mergedIso = normalizeIsoDate(merged?.schedule?.[0]?.isoDate) || normalizeIsoDate(merged?.saleDate)
+    const rowIso = normalizeIsoDate(r.saleDateIso)
+    const needsDate = !mergedIso
+    if (rowIso && (merged.schedule == null || merged.schedule.length === 0 || needsDate)) {
+      merged.schedule = [{ isoDate: r.saleDateIso, openMinutes: r.openMinutes ?? null, closeMinutes: r.closeMinutes ?? null }]
+      merged.openMinutes = r.openMinutes ?? merged.openMinutes
+      merged.closeMinutes = r.closeMinutes ?? merged.closeMinutes
+    }
+  }
 
   // Union vision occurrences + every text source (colored flyer lines often missing from OCR).
   const schedule = dedupeOccurrencesByDate([
@@ -474,6 +668,18 @@ export default function App() {
   const [shareToast, setShareToast] = useState(null)
   const [offline, setOffline] = useState(() => (typeof navigator !== 'undefined' ? !navigator.onLine : false))
   const [undoDeleteLabel, setUndoDeleteLabel] = useState(null)
+  /** Sales tab: require confirm before remove (avoids mis-taps next to “On map”). */
+  const [deleteConfirmSaleId, setDeleteConfirmSaleId] = useState(null)
+  const [resetAllOpen, setResetAllOpen] = useState(false)
+  const [resetAllText, setResetAllText] = useState('')
+  const [resetAllBusy, setResetAllBusy] = useState(false)
+  const [resetAllError, setResetAllError] = useState('')
+  const [townwideUrl, setTownwideUrl] = useState('')
+  const [townwideText, setTownwideText] = useState('')
+  const [townwideState, setTownwideState] = useState('NJ')
+  const [townwideBusy, setTownwideBusy] = useState(false)
+  const [townwideError, setTownwideError] = useState('')
+  const [townwideProgress, setTownwideProgress] = useState(null)
   const undoSaleRef = useRef(null)
   const undoBlobRef = useRef(null)
   const undoTimerRef = useRef(null)
@@ -731,7 +937,7 @@ export default function App() {
         try {
           const salesFromPhoto = await processScreenshotFile(file, interestRows, i, (patch) => {
             setPhotoImportProgress((prev) => (prev ? { ...prev, ...patch } : prev))
-          })
+          }, { defaultState: townwideState })
           newSales.push(...salesFromPhoto)
         } catch (err) {
           failures.push(`${originalFile?.name || 'image'}: ${err?.message || String(err)}`)
@@ -757,6 +963,153 @@ export default function App() {
       }
     } finally {
       setPhotoImportProgress(null)
+    }
+  }
+
+  const importTownwideRows = async (rows, { stateAbbrev = '' } = {}) => {
+    const st = loadState()
+    const interestRows = st.interests
+    const base = Date.now()
+    const created = []
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i]
+      const saleId = newId()
+      const labelTown = String(r.town || '').trim()
+      const st2 = String(stateAbbrev || '').trim().toUpperCase()
+      const address = String(r.address || '').trim()
+      const addrQuery = [address, labelTown, st2].filter(Boolean).join(', ')
+      const rawText = String(r.comments || '').trim()
+      const { score, matches } = scoreTextAgainstInterests(rawText, interestRows)
+      const sale = {
+        id: saleId,
+        title: labelTown ? `${labelTown} sale` : 'Townwide sale',
+        rawText,
+        addressQuery: addrQuery || address,
+        saleDate: r.saleDateIso || null,
+        lat: null,
+        lon: null,
+        displayName: null,
+        openMinutes: r.openMinutes ?? null,
+        closeMinutes: r.closeMinutes ?? null,
+        priorityScore: score,
+        interestMatches: matches,
+        createdAt: base + i,
+        hasImage: false,
+        visitedAt: null,
+        needsReview: computeSaleNeedsReview({
+          saleDate: r.saleDateIso || null,
+          rawText,
+          addressQuery: addrQuery || address,
+          title: labelTown ? `${labelTown} sale` : 'Townwide sale',
+        }),
+      }
+      created.push(sale)
+    }
+
+    // Persist first so progress updates don't risk losing rows mid-import.
+    const combined = [...st.sales, ...created]
+    persist({ sales: combined })
+    setRouteResult(null)
+
+    // Auto-geocode so pins appear immediately.
+    const latest = loadState().sales
+    for (let i = 0; i < created.length; i++) {
+      const s = created[i]
+      const query = String(s.addressQuery || '').trim()
+      if (!query) continue
+      setTownwideProgress({ done: i, total: created.length, phase: 'geocode' })
+      try {
+        const g = await geocodeAddress(query)
+        const current = latest.find((x) => x.id === s.id) || s
+        updateSaleField(s.id, { lat: g.lat, lon: g.lon, displayName: g.displayName, needsReview: current.needsReview })
+      } catch {
+        updateSaleField(s.id, { needsReview: true })
+      }
+    }
+    setTownwideProgress({ done: created.length, total: created.length, phase: 'done' })
+    return created.length
+  }
+
+  const onImportTownwide = async () => {
+    setTownwideError('')
+    setTownwideProgress(null)
+    const url = String(townwideUrl || '').trim()
+    const pasted = String(townwideText || '').trim()
+    const st = String(townwideState || '').trim().toUpperCase()
+    if (!/^[A-Z]{2}$/.test(st)) {
+      setTownwideError('Enter a 2-letter state (example: NJ).')
+      return
+    }
+    setTownwideBusy(true)
+    try {
+      let rows = []
+      if (pasted) {
+        rows = extractTownwideRowsFromText(pasted)
+      } else if (url) {
+        const resp = await fetch('/api/extract-townwide', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url }),
+        })
+        const json = await resp.json().catch(() => ({}))
+        if (!resp.ok) throw new Error(json?.error || `Import failed (${resp.status})`)
+        rows = Array.isArray(json?.rows) ? json.rows : []
+        if (!rows.length) {
+          const warn = String(json?.warning || '').trim()
+          throw new Error(
+            warn ||
+              'No rows found from that URL. If it’s a Laserfiche page, use “Copy table” and paste it into the text box instead.',
+          )
+        }
+      } else {
+        setTownwideError('Paste a URL or paste the copied table text.')
+        return
+      }
+
+      if (rows.length < 1) {
+        setTownwideError('No sale rows found. Make sure you copied the whole table.')
+        return
+      }
+      setTownwideProgress({ done: 0, total: rows.length, phase: 'create' })
+      const count = await importTownwideRows(rows, { stateAbbrev: st })
+      setTownwideUrl('')
+      setTownwideText('')
+      if (count > 0) {
+        setError(`Imported ${count} sale(s) from the townwide list.`)
+      }
+    } catch (e) {
+      setTownwideError(e?.message || 'Import failed')
+    } finally {
+      setTownwideBusy(false)
+    }
+  }
+
+  const resetAllSales = async () => {
+    const ok = String(resetAllText || '').trim().toUpperCase() === 'DELETE'
+    if (!ok) {
+      setResetAllError('Type DELETE to confirm.')
+      return
+    }
+    setResetAllError('')
+    setResetAllBusy(true)
+    try {
+      const ids = loadState().sales.map((s) => s.id).filter(Boolean)
+      await deleteManySaleImages(ids).catch(() => {})
+      persist({ sales: [] })
+      setRouteResult(null)
+      setSaleCardOpen({})
+      setSaleCardBodyMounted({})
+      setDeleteConfirmSaleId(null)
+      setUndoDeleteLabel(null)
+      undoSaleRef.current = null
+      undoBlobRef.current = null
+      setResetAllOpen(false)
+      setResetAllText('')
+      setError('All sales deleted.')
+    } catch (e) {
+      setResetAllError(e?.message || 'Reset failed')
+    } finally {
+      setResetAllBusy(false)
     }
   }
 
@@ -799,6 +1152,7 @@ export default function App() {
     const s = loadState().sales.find((x) => x.id === id)
     if (!s?.addressQuery?.trim()) return
     setError(null)
+    setDeleteConfirmSaleId((cur) => (cur === id ? null : cur))
     setGeocodingSaleId(id)
     setBusy('Putting this sale on the map…')
     try {
@@ -834,6 +1188,36 @@ export default function App() {
       setError(err.message || String(err))
     }
   }, [clearUndoTimer, persist])
+
+  const performDeleteSale = useCallback(
+    async (s) => {
+      setError(null)
+      try {
+        const blob = await getSaleImageBlob(s.id)
+        undoSaleRef.current = JSON.parse(JSON.stringify(s))
+        undoBlobRef.current = blob
+        setUndoDeleteLabel((s.title || s.addressQuery || 'Sale').slice(0, 56))
+        scheduleUndoExpiry()
+        await deleteSaleImage(s.id)
+        persist({ sales: removeSale(loadState().sales, s.id) })
+        setRouteResult(null)
+        setDeleteConfirmSaleId(null)
+        setSaleCardOpen((prev) => {
+          const next = { ...prev }
+          delete next[s.id]
+          return next
+        })
+        setSaleCardBodyMounted((prev) => {
+          const next = { ...prev }
+          delete next[s.id]
+          return next
+        })
+      } catch (err) {
+        setError(err.message || String(err))
+      }
+    },
+    [persist, scheduleUndoExpiry],
+  )
 
   const reparseSale = async (id) => {
     setError(null)
@@ -1251,6 +1635,10 @@ export default function App() {
     persist({ settings: { ...settings, guidedStep: next } })
   }
 
+  useEffect(() => {
+    setDeleteConfirmSaleId(null)
+  }, [guidedStep])
+
   const renderTripTools = () => {
     if (sales.length === 0) return null
     return (
@@ -1547,6 +1935,84 @@ export default function App() {
             <input type="file" accept="image/*" multiple onChange={onUpload} style={{ display: 'none' }} />
           </label>
 
+          <details className="ysm-details" style={{ marginTop: 12 }}>
+            <summary>Import a townwide sale list (URL or copied table)</summary>
+            <p style={{ fontSize: 13, color: 'var(--ysm-text-muted)', margin: '10px 0 10px', lineHeight: 1.45 }}>
+              For pages like Woodbridge’s list with <strong>Sale Date</strong>, <strong>Rain Date</strong>, and many addresses.
+              We <strong>always</strong> use the Sale Date and ignore Rain Date.
+            </p>
+            <div style={{ display: 'grid', gap: 10 }}>
+              <label style={{ ...labelSmall(), display: 'block' }}>
+                State (2 letters)
+                <input
+                  value={townwideState}
+                  onChange={(e) => setTownwideState(e.target.value)}
+                  placeholder="NJ"
+                  maxLength={2}
+                  style={inp()}
+                />
+              </label>
+              <label style={{ ...labelSmall(), display: 'block' }}>
+                URL (optional)
+                <input
+                  value={townwideUrl}
+                  onChange={(e) => setTownwideUrl(e.target.value)}
+                  placeholder="Paste the page URL"
+                  style={inp()}
+                />
+              </label>
+              <label style={{ ...labelSmall(), display: 'block' }}>
+                Or paste the copied table text (recommended for Laserfiche pages)
+                <textarea
+                  value={townwideText}
+                  onChange={(e) => setTownwideText(e.target.value)}
+                  placeholder="Copy the table rows and paste here…"
+                  rows={5}
+                  style={{ ...inp(), resize: 'vertical' }}
+                />
+              </label>
+
+              {townwideError ? (
+                <div style={{ fontSize: 13, color: 'var(--ysm-text-danger)', lineHeight: 1.4 }}>{townwideError}</div>
+              ) : null}
+
+              {townwideProgress ? (
+                <div style={{ fontSize: 13, color: 'var(--ysm-text-muted)', lineHeight: 1.4 }}>
+                  {townwideProgress.phase === 'geocode'
+                    ? `Placing pins… ${townwideProgress.done}/${townwideProgress.total}`
+                    : townwideProgress.phase === 'done'
+                      ? `Done — ${townwideProgress.total} pins added.`
+                      : 'Importing…'}
+                </div>
+              ) : null}
+
+              <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                <button
+                  type="button"
+                  onClick={onImportTownwide}
+                  disabled={townwideBusy}
+                  className="ysm-btn-primary"
+                  style={{ opacity: townwideBusy ? 0.7 : 1 }}
+                >
+                  {townwideBusy ? 'IMPORTING…' : 'IMPORT LIST'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setTownwideError('')
+                    setTownwideProgress(null)
+                    setTownwideUrl('')
+                    setTownwideText('')
+                  }}
+                  style={btn()}
+                  disabled={townwideBusy}
+                >
+                  Clear
+                </button>
+              </div>
+            </div>
+          </details>
+
           <h2 className="ysm-section-title" id="ysm-keywords">
             What you’re looking for
           </h2>
@@ -1645,7 +2111,8 @@ export default function App() {
           {settings.showPriorityOnly ? (
             <p style={{ fontSize: 13, color: 'var(--ysm-text-subtle)', margin: '-8px 0 12px', lineHeight: 1.45 }}>
               The map pin button shows <strong style={{ color: 'var(--ysm-text-success)', fontWeight: 600 }}>On map</strong> when a pin exists.
-              Sales without a pin show <span className="ysm-map-badge ysm-map-badge--off">No pin yet</span>.
+              Sales without a pin show <span className="ysm-map-badge ysm-map-badge--off">No pin yet</span>.{' '}
+              <strong>Remove</strong> asks for confirmation so it’s harder to delete by accident.
             </p>
           ) : null}
 
@@ -1695,6 +2162,38 @@ export default function App() {
                   style={{ display: 'none' }}
                 />
               </label>
+            </div>
+          </details>
+
+          <details className="ysm-details" style={{ marginBottom: 12 }}>
+            <summary>Reset (delete all sales)</summary>
+            <p style={{ fontSize: 13, color: 'var(--ysm-text-muted)', margin: '10px 0 10px', lineHeight: 1.45 }}>
+              This permanently deletes every sale in this app on this device (and clears stored photos). Type{' '}
+              <strong>DELETE</strong> to confirm.
+            </p>
+            <div style={{ display: 'grid', gap: 10 }}>
+              <input
+                value={resetAllText}
+                onChange={(e) => setResetAllText(e.target.value)}
+                placeholder="Type DELETE"
+                style={inp()}
+                disabled={resetAllBusy}
+              />
+              {resetAllError ? (
+                <div style={{ fontSize: 13, color: 'var(--ysm-text-danger)', lineHeight: 1.4 }}>{resetAllError}</div>
+              ) : null}
+              <button
+                type="button"
+                onClick={resetAllSales}
+                disabled={resetAllBusy}
+                style={{
+                  ...btn(),
+                  borderColor: 'rgba(239,68,68,0.45)',
+                  color: 'var(--ysm-text-danger)',
+                }}
+              >
+                {resetAllBusy ? 'DELETING…' : 'Delete all sales'}
+              </button>
             </div>
           </details>
 
@@ -1871,7 +2370,9 @@ export default function App() {
                         gap: 6,
                         flexShrink: 0,
                         alignItems: 'stretch',
-                        width: 108,
+                        minWidth: 108,
+                        width: deleteConfirmSaleId === s.id ? 'auto' : 108,
+                        maxWidth: deleteConfirmSaleId === s.id ? 148 : undefined,
                         marginTop: 2,
                       }}
                     >
@@ -1898,40 +2399,47 @@ export default function App() {
                       >
                         {geocodingSaleId === s.id ? 'Working…' : onMap ? 'On map' : 'Put on map'}
                       </button>
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.preventDefault()
-                          e.stopPropagation()
-                          ;(async () => {
-                            try {
-                              const blob = await getSaleImageBlob(s.id)
-                              undoSaleRef.current = JSON.parse(JSON.stringify(s))
-                              undoBlobRef.current = blob
-                              setUndoDeleteLabel((s.title || s.addressQuery || 'Sale').slice(0, 56))
-                              scheduleUndoExpiry()
-                              await deleteSaleImage(s.id)
-                              persist({ sales: removeSale(loadState().sales, s.id) })
-                              setRouteResult(null)
-                              setSaleCardOpen((prev) => {
-                                const next = { ...prev }
-                                delete next[s.id]
-                                return next
-                              })
-                              setSaleCardBodyMounted((prev) => {
-                                const next = { ...prev }
-                                delete next[s.id]
-                                return next
-                              })
-                            } catch (err) {
-                              setError(err.message || String(err))
-                            }
-                          })()
-                        }}
-                        style={{ ...btnGhost(), flexShrink: 0 }}
-                      >
-                        Delete
-                      </button>
+                      {deleteConfirmSaleId === s.id ? (
+                        <div className="ysm-sale-delete-confirm" role="group" aria-label="Confirm remove sale">
+                          <span className="ysm-sale-delete-confirm-label">Remove this sale?</span>
+                          <div className="ysm-sale-delete-confirm-actions">
+                            <button
+                              type="button"
+                              className="ysm-sale-delete-cancel"
+                              onClick={(e) => {
+                                e.preventDefault()
+                                e.stopPropagation()
+                                setDeleteConfirmSaleId(null)
+                              }}
+                            >
+                              Cancel
+                            </button>
+                            <button
+                              type="button"
+                              className="ysm-sale-delete-confirm-btn"
+                              onClick={(e) => {
+                                e.preventDefault()
+                                e.stopPropagation()
+                                void performDeleteSale(s)
+                              }}
+                            >
+                              Delete
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          className="ysm-sale-remove-link"
+                          onClick={(e) => {
+                            e.preventDefault()
+                            e.stopPropagation()
+                            setDeleteConfirmSaleId(s.id)
+                          }}
+                        >
+                          Remove
+                        </button>
+                      )}
                     </div>
                   </div>
                   {saleCardBodyMounted[s.id] ? (

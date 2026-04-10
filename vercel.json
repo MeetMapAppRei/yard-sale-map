@@ -5,6 +5,9 @@
     },
     "api/geocode.js": {
       "maxDuration": 15
+    },
+    "api/extract-townwide.js": {
+      "maxDuration": 20
     }
   }
 }

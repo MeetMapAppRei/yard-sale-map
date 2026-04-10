@@ -730,7 +730,7 @@ details.ysm-subdetails > summary {
   transition: width 0.35s ease-out;
 }
 
-/* Collapsed sale row: Put on map stacked above Delete */
+/* Collapsed sale row: Put on map stacked above Remove */
 .ysm-summary-map-btn {
   padding: 8px 6px;
   border-radius: 8px;
@@ -788,6 +788,90 @@ details.ysm-subdetails > summary {
   color: #86efac;
   border-color: #15803d;
   box-shadow: none;
+}
+
+/* Sales row: low-emphasis remove + two-step confirm (keeps “Put on map” as the obvious tap target) */
+.ysm-sale-remove-link {
+  align-self: flex-start;
+  padding: 6px 2px;
+  margin: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ysm-text-muted);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+  line-height: 1.2;
+}
+
+.ysm-sale-remove-link:hover {
+  color: var(--ysm-text);
+}
+
+.ysm-sale-remove-link:focus-visible {
+  outline: 2px solid var(--ysm-focus-ring);
+  outline-offset: 2px;
+}
+
+.ysm-sale-delete-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: stretch;
+}
+
+.ysm-sale-delete-confirm-label {
+  font-size: 11px;
+  line-height: 1.25;
+  color: var(--ysm-text-muted);
+  text-align: center;
+}
+
+.ysm-sale-delete-confirm-actions {
+  display: flex;
+  gap: 4px;
+  justify-content: stretch;
+}
+
+.ysm-sale-delete-cancel,
+.ysm-sale-delete-confirm-btn {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 4px;
+  border-radius: 8px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  line-height: 1.2;
+  border: 1px solid var(--ysm-ghost-border);
+  font-family: var(--ysm-font);
+}
+
+.ysm-sale-delete-cancel {
+  background: var(--ysm-ghost-bg);
+  color: var(--ysm-text-muted);
+}
+
+.ysm-sale-delete-confirm-btn {
+  background: rgba(220, 38, 38, 0.22);
+  border-color: rgba(248, 113, 113, 0.4);
+  color: #fecaca;
+}
+
+.ysm-sale-delete-cancel:focus-visible,
+.ysm-sale-delete-confirm-btn:focus-visible {
+  outline: 2px solid var(--ysm-focus-ring);
+  outline-offset: 1px;
+}
+
+[data-ysm-theme='light'] .ysm-sale-delete-confirm-btn {
+  background: #fee2e2;
+  border-color: #fecaca;
+  color: #991b1b;
 }
 
 .ysm-sale-meta-line {

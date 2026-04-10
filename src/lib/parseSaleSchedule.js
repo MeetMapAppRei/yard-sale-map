@@ -130,18 +130,45 @@ function normalizeScheduleInput(t) {
   return s
 }
 
+/** Convert bare hour (no am/pm) to minutes; yard sales run 6 AM – 6 PM so bias accordingly. */
+function bareHourToMinutes(h) {
+  // Hours 1-6 are ambiguous (1pm-6pm more likely for a close time, but we call context elsewhere).
+  // For consistency: treat 1-6 as PM open, 7-12 as AM. Caller can override.
+  if (h >= 7 && h <= 12) return h * 60       // 7–12 → AM
+  if (h >= 1 && h <= 6) return (h + 12) * 60 // 1–6 → PM
+  return h * 60
+}
+
 function extractTimeRangeMinutes(text) {
   const t = String(text || '')
-  // Prefer explicit "9:00 AM - 3:00 PM" style ranges.
+
+  // 1) Explicit "9:00 AM - 3:00 PM" or "9am-3pm" ranges (both sides have am/pm or HH:MM).
   const range = t.match(/(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)\s*(?:-|–|to)\s*(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)/i)
   if (range) {
     const open = parseTimeInput(range[1])
     const close = parseTimeInput(range[2])
-    return { openMinutes: open, closeMinutes: close }
+    // If both parsed cleanly, use them.
+    if (open != null && close != null) return { openMinutes: open, closeMinutes: close }
+    // If one side has am/pm and we got at least one, still return it.
+    if (open != null || close != null) return { openMinutes: open, closeMinutes: close }
+    // Bare number range like "9-2" or "8-1" — very common on hand-written flyer signs.
+    // Assume open is AM (7–12) and close is PM (1–6) for typical yard sale hours.
+    const leftN = parseInt(range[1], 10)
+    const rightN = parseInt(range[2], 10)
+    // Bare hour ranges like "9-3", "8-1", "7-12", "9-12" — yard sales run 6 AM–6 PM.
+    // Open hours: 6–12 AM. Close hours: 1–12 (1–6 treated as PM, 7–12 treated as AM/noon).
+    if (!Number.isNaN(leftN) && !Number.isNaN(rightN) && leftN >= 6 && leftN <= 12 && rightN >= 1 && rightN <= 12) {
+      const openMin = leftN * 60 // open is always AM (6–12)
+      // Close: 1–6 → PM, 7–12 → AM/noon (e.g. "9-12" = 9am-noon, "8-2" = 8am-2pm)
+      const closeMin = rightN <= 6 ? (rightN + 12) * 60 : rightN * 60
+      return { openMinutes: openMin, closeMinutes: closeMin }
+    }
   }
-  // Or a single time like "9am" -> open.
+
+  // 2) Single time with am/pm marker like "9am" or "9:30am".
   const single = t.match(/\b(\d{1,2}(?::\d{2})?\s*(?:am|pm))\b/i)
   if (single) return { openMinutes: parseTimeInput(single[1]), closeMinutes: null }
+
   return { openMinutes: null, closeMinutes: null }
 }
 
@@ -179,6 +206,51 @@ export function extractSaleSchedule(text, now = new Date()) {
   }
 
   const out = []
+
+  // -1) "This Saturday", "Next Friday", "This weekend" → resolve to actual upcoming calendar date.
+  const WEEKDAY_INDEX = { sun: 0, sunday: 0, mon: 1, monday: 1, tue: 2, tuesday: 2, wed: 3, wednesday: 3, thu: 4, thursday: 4, fri: 5, friday: 5, sat: 6, saturday: 6 }
+  const reRelative = /\b(this|next)\s+(sun(?:day)?|mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?)\b/gi
+  let rm
+  while ((rm = reRelative.exec(t)) !== null) {
+    const qualifier = rm[1].toLowerCase()
+    const dayName = rm[2].toLowerCase().replace(/day$/, '').replace(/nes$/, '').replace(/rs$/, '').trim()
+    // Normalise to short form for lookup
+    const shortDay = rm[2].toLowerCase().slice(0, 3)
+    const targetWd = WEEKDAY_INDEX[shortDay] ?? WEEKDAY_INDEX[rm[2].toLowerCase()]
+    if (targetWd == null) continue
+    const todayWd = now.getDay()
+    let daysAhead = (targetWd - todayWd + 7) % 7
+    if (qualifier === 'this' && daysAhead === 0) daysAhead = 7  // "this Saturday" when today is Saturday → next week
+    if (qualifier === 'next') daysAhead = daysAhead === 0 ? 7 : daysAhead + 7
+    if (daysAhead === 0) daysAhead = 7
+    const d = new Date(now)
+    d.setDate(d.getDate() + daysAhead)
+    const iso = isoFromYmd(d.getFullYear(), d.getMonth() + 1, d.getDate())
+    const slice = t.slice(rm.index, Math.min(t.length, rm.index + 120))
+    const { openMinutes, closeMinutes } = extractTimeRangeMinutes(slice)
+    out.push({ isoDate: iso, openMinutes, closeMinutes })
+  }
+
+  // -0.5) "Saturday & Sunday", "Friday and Saturday", "Fri & Sat" — two-day combos without explicit dates.
+  // Only fire when NO numeric/named date was matched in the same text (guard below via dedup).
+  const reWeekdayPair = /\b(sun(?:day)?|mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?)\s*(?:&|and)\s*(sun(?:day)?|mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?)\b/gi
+  let wp
+  while ((wp = reWeekdayPair.exec(t)) !== null) {
+    for (const raw of [wp[1], wp[2]]) {
+      const short = raw.toLowerCase().slice(0, 3)
+      const wd = WEEKDAY_INDEX[short]
+      if (wd == null) continue
+      const todayWd = now.getDay()
+      let daysAhead = (wd - todayWd + 7) % 7
+      if (daysAhead === 0) daysAhead = 7
+      const d = new Date(now)
+      d.setDate(d.getDate() + daysAhead)
+      const iso = isoFromYmd(d.getFullYear(), d.getMonth() + 1, d.getDate())
+      const slice = t.slice(wp.index, Math.min(t.length, wp.index + 120))
+      const { openMinutes, closeMinutes } = extractTimeRangeMinutes(slice)
+      out.push({ isoDate: iso, openMinutes, closeMinutes })
+    }
+  }
 
   // 0) Inline ISO dates (some OCR/AI emits these even when month-name lines fail).
   const reInlineIso = /\b(20\d{2})-(\d{1,2})-(\d{1,2})\b/g
@@ -242,6 +314,28 @@ export function extractSaleSchedule(text, now = new Date()) {
     const slice = t.slice(m.index, Math.min(t.length, m.index + 120))
     const { openMinutes, closeMinutes } = extractTimeRangeMinutes(slice)
     out.push({ isoDate: iso, openMinutes, closeMinutes })
+  }
+
+  // 1b2) Same-month day ranges: "Apr 11-12" / "April 11 & 12" — two days in same month.
+  // IMPORTANT: comma is intentionally excluded from the separator set to avoid "Apr 12, 2026"
+  // being mistakenly parsed as a range (day1=12, day2=20 from "2026").
+  // Negative lookahead (?!\d{3,}) prevents matching years (3+ digits) as the second day.
+  const reSameMonthRange = new RegExp(
+    String.raw`\b(${monthNames})\b\.?\s*(\d{1,2})(?:st|nd|rd|th)?\s*(?:[–\-]|and|&)\s*(?!\d{3,})(\d{1,2})(?:st|nd|rd|th)?(?:[,\s.]+(\d{4}))?`,
+    'gi',
+  )
+  while ((m = reSameMonthRange.exec(t)) !== null) {
+    const mon = MONTHS[String(m[1] || '').toLowerCase()]
+    if (!mon) continue
+    const day1 = Number(m[2])
+    const day2 = Number(m[3])
+    const yearStr = m[4]
+    const year = yearStr ? Number(yearStr) : inferYearForMonthDay(mon, day1, now)
+    const slice = t.slice(m.index, Math.min(t.length, m.index + 120))
+    const { openMinutes, closeMinutes } = extractTimeRangeMinutes(slice)
+    for (const day of [day1, day2]) {
+      if (day >= 1 && day <= 31) out.push({ isoDate: isoFromYmd(year, mon, day), openMinutes, closeMinutes })
+    }
   }
 
   // 1c) Weekday + US slash (common on postmygaragesale.com / screenshots): "Saturday 4/11/26", "Sat 4/11"
