@@ -159,7 +159,7 @@ async function processScreenshotFile(file, interestRows, createdAtOffset = 0, re
       // Find *all* candidate street lines; OCR often includes multiple variants,
       // e.g. "2 Cedar St" and later "9 26 Cedar St" in the same screenshot.
       const re =
-        /\b(\d{1,5}\s+[A-Za-z0-9.'-]+(?:\s+[A-Za-z0-9.'-]+){0,6}\s+(?:St|Street|Ave|Avenue|Rd|Road|Dr|Drive|Ln|Lane|Ct|Court|Blvd|Boulevard|Way|Pkwy|Parkway|Pl|Place|Ter|Terrace)\b[^\n]*)/gi
+        /\b(\d{1,5}\s+[A-Za-z0-9.'-]+(?:\s+[A-Za-z0-9.'-]+){0,6}\s+(?:St|Street|Ave|Avenue|Rd|Road|Dr|Drive|Ln|Lane|Ct|Court|Cir|Circle|Blvd|Boulevard|Way|Pkwy|Parkway|Pl|Place|Ter|Terrace|Trl|Trail|Cres|Crescent|Hwy|Highway|Run|Loop|Xing|Crossing)\b[^\n]*)/gi
       const candidates = []
       for (const m of t.matchAll(re)) {
         const line = cleanStreetLine(m[1])

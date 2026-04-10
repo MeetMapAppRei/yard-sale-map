@@ -138,11 +138,14 @@ Look carefully — times are often small or on a busy background. Common formats
   • Use null (not empty string) when a time field is not found.
 
 ━━━ ADDRESS EXTRACTION ━━━
-  • street_address = house number + street name + suffix ONLY. Examples: "47 Oak Ave", "123 Main St Apt 2"
+  • street_address = house number + street name + suffix ONLY. Examples: "47 Oak Ave", "123 Main St Apt 2", "14 Walnut Cir", "9 Elm Trl"
     – Do NOT include town, state, or ZIP in street_address.
     – Strip labels like "Where:", "Address:", "Location:" — include only the address text itself.
-    – If a single stray digit appears before the real house number (map pin OCR artifact like "9 107 Maple Dr"), remove the leading digit → "107 Maple Dr".
-  • town = city/town name only. state = 2-letter code only if visible. zip = 5 digits only if visible.
+    – If a single stray digit appears before the real house number (map pin OCR artifact like "9 107 Maple Dr" or "9 16 Fieldview Dr"), remove the leading digit → "107 Maple Dr" / "16 Fieldview Dr".
+  • town = the FULL city or town name, which may be multiple words. Examples: "Basking Ridge", "New Brunswick", "Long Branch", "South Orange", "Clark", "Woodbridge".
+    – CRITICAL: If the address wraps across two lines (e.g. "14 Walnut Cir, Basking" on line 1 and "Ridge, NJ 07920" on line 2), combine them correctly: street_address="14 Walnut Cir", town="Basking Ridge", state="NJ", zip="07920". Do NOT split a multi-word town name across street_address and town.
+    – If you see a town like "Basking Ridge" do not shorten it to just "Ridge".
+  • state = 2-letter code only if visible. zip = 5 digits only if visible.
   • Do NOT invent an address if none is shown — leave street_address as empty string "".
 
 ━━━ MULTIPLE LISTINGS ━━━

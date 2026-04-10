@@ -57,7 +57,7 @@ export function guessAddressLine(text) {
     .split(/\r?\n/)
     .map((l) => l.trim())
     .filter(Boolean)
-  const streetish = /\b(street|st\.?|avenue|ave\.?|road|rd\.?|drive|dr\.?|lane|ln\.?|blvd|way|court|ct\.?|circle|hwy|route|#\d+)\b/i
+  const streetish = /\b(street|st\.?|avenue|ave\.?|road|rd\.?|drive|dr\.?|lane|ln\.?|blvd|boulevard|way|court|ct\.?|circle|cir\.?|trail|trl\.?|terrace|ter\.?|place|pl\.?|parkway|pkwy\.?|crescent|cres\.?|highway|hwy|loop|run|crossing|xing|route|#\d+)\b/i
   const hasNumber = /\d{3,}/
   const scored = lines.map((line) => {
     let s = 0
